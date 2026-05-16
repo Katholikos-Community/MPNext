@@ -6,7 +6,7 @@ import {
   useState,
   useMemo,
   useCallback,
-  useTransition,
+  useEffect,
   use,
   ReactNode,
 } from "react";
@@ -25,28 +25,32 @@ interface UserProviderProps {
   children: ReactNode;
 }
 
+const RESOLVED_NULL: Promise<MPUserProfile | null> = Promise.resolve(null);
+
 export function UserProvider({ children }: UserProviderProps) {
   const { data: session, isPending } = authClient.useSession();
   const [refreshKey, setRefreshKey] = useState(0);
-  const [, startTransition] = useTransition();
 
   // userGuid is the MP User_GUID stored as an additionalField on the Better Auth user.
   // Better Auth generates its own internal user.id, so we use userGuid for MP lookups.
   const userGuid = (session?.user as { userGuid?: string } | undefined)?.userGuid;
 
-  const userProfilePromise = useMemo<Promise<MPUserProfile | null>>(() => {
-    if (isPending) return Promise.resolve(null);
-    if (!userGuid) return Promise.resolve(null);
-    // refreshKey is read to invalidate the memo on refresh, even though
-    // it isn't otherwise referenced in the body.
-    void refreshKey;
-    return getCurrentUserProfile(userGuid).then((p) => p ?? null);
+  const [userProfilePromise, setUserProfilePromise] =
+    useState<Promise<MPUserProfile | null>>(RESOLVED_NULL);
+
+  // Server actions trigger router cache invalidation, so kick them off from
+  // an effect — calling during render would setState on the Router mid-render.
+  useEffect(() => {
+    if (isPending) return;
+    if (!userGuid) {
+      setUserProfilePromise(RESOLVED_NULL);
+      return;
+    }
+    setUserProfilePromise(getCurrentUserProfile(userGuid).then((p) => p ?? null));
   }, [userGuid, isPending, refreshKey]);
 
   const refreshUserProfile = useCallback(() => {
-    startTransition(() => {
-      setRefreshKey((k) => k + 1);
-    });
+    setRefreshKey((k) => k + 1);
   }, []);
 
   const value = useMemo<UserContextValue>(
