@@ -28,7 +28,7 @@ export function Header() {
 
           {/* Center - App title */}
           <h1 className="text-lg font-semibold text-white truncate">
-            {process.env.NEXT_PUBLIC_APP_NAME || "Pastor App"}
+            {process.env.NEXT_PUBLIC_APP_NAME || "MPNext"}
           </h1>
 
           {/* Right side - User avatar */}

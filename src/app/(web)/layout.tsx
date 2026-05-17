@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Pastor App",
+  title: process.env.NEXT_PUBLIC_APP_NAME || "MPNext",
   description: "Ministry Platform Pastor Application",
   icons: {
     icon: "/assets/icons/favicon.ico",
