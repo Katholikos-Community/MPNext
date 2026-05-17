@@ -1,6 +1,6 @@
 import { ContactSearch } from "@/lib/dto";
 import { MPHelper } from "@/lib/providers/ministry-platform";
-import { sanitizeFilterValue, sanitizeGuid } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
+import { sanitizeLikeValue, sanitizeGuid } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
 
 /**
  * ContactService - Singleton service for managing contact-related operations
@@ -53,9 +53,13 @@ export class ContactService {
    * @returns Promise<ContactSearch[]> - Array of matching contacts (limited to 20 results)
    */
   public async contactSearch(search: string): Promise<ContactSearch[]> {
+    const term = sanitizeLikeValue(search);
+    const filter = ["First_Name", "Last_Name", "Nickname", "Email_Address", "Mobile_Phone"]
+      .map((col) => `${col} LIKE '%${term}%' ESCAPE '\\'`)
+      .join(" OR ");
     const records = await this.mp!.getTableRecords<ContactSearch>({
       table: "Contacts",
-      filter: `First_Name LIKE '%${sanitizeFilterValue(search)}%' OR Last_Name LIKE '%${sanitizeFilterValue(search)}%' OR Nickname LIKE '%${sanitizeFilterValue(search)}%' OR Email_Address LIKE '%${sanitizeFilterValue(search)}%' OR Mobile_Phone LIKE '%${sanitizeFilterValue(search)}%'`,
+      filter,
       select: "Contact_ID, Contact_GUID,First_Name,Nickname,Last_Name,Email_Address,Mobile_Phone,dp_fileUniqueId AS Image_GUID",
       top: 20
     });

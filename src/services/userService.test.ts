@@ -28,10 +28,13 @@ describe('UserService', () => {
   });
 
   describe('getUserProfile', () => {
+    const validGuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    const otherValidGuid = 'b2c3d4e5-f678-9012-3456-7890abcdef12';
+
     it('should fetch user profile with roles and groups', async () => {
       const mockProfile = {
         User_ID: 1,
-        User_GUID: 'test-guid-123',
+        User_GUID: validGuid,
         Contact_ID: 100,
         First_Name: 'John',
         Nickname: 'Johnny',
@@ -46,12 +49,12 @@ describe('UserService', () => {
         .mockResolvedValueOnce([{ User_Group_Name: 'Staff' }]);
 
       const service = await UserService.getInstance();
-      const result = await service.getUserProfile('test-guid-123');
+      const result = await service.getUserProfile(validGuid);
 
       expect(mockGetTableRecords).toHaveBeenCalledTimes(3);
       expect(mockGetTableRecords).toHaveBeenCalledWith({
         table: 'dp_Users',
-        filter: "User_GUID = 'test-guid-123'",
+        filter: `User_GUID = '${validGuid}'`,
         select: expect.stringContaining('User_ID'),
         top: 1,
       });
@@ -76,7 +79,7 @@ describe('UserService', () => {
       mockGetTableRecords.mockResolvedValueOnce([]);
 
       const service = await UserService.getInstance();
-      const result = await service.getUserProfile('nonexistent-guid');
+      const result = await service.getUserProfile(validGuid);
 
       expect(result).toBeUndefined();
       expect(mockGetTableRecords).toHaveBeenCalledTimes(1);
@@ -85,7 +88,7 @@ describe('UserService', () => {
     it('should return empty arrays when user has no roles or groups', async () => {
       const mockProfile = {
         User_ID: 2,
-        User_GUID: 'test-guid-456',
+        User_GUID: otherValidGuid,
         Contact_ID: 200,
         First_Name: 'Jane',
         Nickname: 'Jane',
@@ -100,7 +103,7 @@ describe('UserService', () => {
         .mockResolvedValueOnce([]);
 
       const service = await UserService.getInstance();
-      const result = await service.getUserProfile('test-guid-456');
+      const result = await service.getUserProfile(otherValidGuid);
 
       expect(result).toEqual({
         ...mockProfile,
@@ -113,7 +116,12 @@ describe('UserService', () => {
       mockGetTableRecords.mockRejectedValueOnce(new Error('API error'));
 
       const service = await UserService.getInstance();
-      await expect(service.getUserProfile('test-guid')).rejects.toThrow('API error');
+      await expect(service.getUserProfile(validGuid)).rejects.toThrow('API error');
+    });
+
+    it('should throw on invalid GUID format', async () => {
+      const service = await UserService.getInstance();
+      await expect(service.getUserProfile('not-a-guid')).rejects.toThrow('Invalid GUID format');
     });
   });
 });

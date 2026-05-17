@@ -4,6 +4,7 @@ import { ContactLog } from "@/lib/providers/ministry-platform/models/ContactLog"
 import { ContactLogTypes } from "@/lib/providers/ministry-platform/models/ContactLogTypes";
 import { ContactLogInput } from "@/lib/providers/ministry-platform/models/ContactLogSchema";
 import { ContactLogService } from "@/services/contactLogService";
+import { sanitizeGuid } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 
@@ -50,7 +51,7 @@ export async function createContactLog(
 
     const users = await mp.getTableRecords<{ User_ID: number }>({
       table: "dp_Users",
-      filter: `User_GUID = '${userGuid}'`,
+      filter: `User_GUID = '${sanitizeGuid(userGuid)}'`,
       select: "User_ID",
       top: 1
     });
@@ -102,7 +103,7 @@ export async function updateContactLog(
 
     const users = await mp.getTableRecords<{ User_ID: number }>({
       table: "dp_Users",
-      filter: `User_GUID = '${userGuid}'`,
+      filter: `User_GUID = '${sanitizeGuid(userGuid)}'`,
       select: "User_ID",
       top: 1
     });

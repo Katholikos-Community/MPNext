@@ -62,8 +62,10 @@ import {
   getContactLogById,
 } from './actions';
 
+const validUserGuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+
 const mockAuthSession = {
-  user: { id: 'internal-id', userGuid: 'user-guid-123' },
+  user: { id: 'internal-id', userGuid: validUserGuid },
 };
 
 describe('contact-logs actions', () => {
