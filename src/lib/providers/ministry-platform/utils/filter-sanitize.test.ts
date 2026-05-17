@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeFilterValue, sanitizeGuid } from './filter-sanitize';
+import { sanitizeFilterValue, sanitizeLikeValue, sanitizeGuid } from './filter-sanitize';
 
 describe('sanitizeFilterValue', () => {
   it('should return plain strings unchanged', () => {
@@ -20,6 +20,36 @@ describe('sanitizeFilterValue', () => {
 
   it('should not alter strings without quotes', () => {
     expect(sanitizeFilterValue('Hello World 123')).toBe('Hello World 123');
+  });
+});
+
+describe('sanitizeLikeValue', () => {
+  it('should return plain strings unchanged', () => {
+    expect(sanitizeLikeValue('John')).toBe('John');
+  });
+
+  it('should escape single quotes', () => {
+    expect(sanitizeLikeValue("O'Brien")).toBe("O''Brien");
+  });
+
+  it('should escape percent wildcards', () => {
+    expect(sanitizeLikeValue('100%')).toBe('100\\%');
+  });
+
+  it('should escape underscore wildcards', () => {
+    expect(sanitizeLikeValue('a_b')).toBe('a\\_b');
+  });
+
+  it('should escape backslashes before other escapes', () => {
+    expect(sanitizeLikeValue('a\\b')).toBe('a\\\\b');
+  });
+
+  it('should escape all special characters together', () => {
+    expect(sanitizeLikeValue("100%_o'reilly\\")).toBe("100\\%\\_o''reilly\\\\");
+  });
+
+  it('should handle empty string', () => {
+    expect(sanitizeLikeValue('')).toBe('');
   });
 });
 

@@ -1,5 +1,6 @@
 import { MPUserProfile } from "@/lib/providers/ministry-platform/types";
 import { MPHelper } from "@/lib/providers/ministry-platform";
+import { sanitizeGuid } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
 
 /**
  * UserService - Singleton service for managing user-related operations
@@ -60,7 +61,7 @@ export class UserService {
   public async getUserProfile(id: string): Promise<MPUserProfile | undefined> {
     const records = await this.mp!.getTableRecords<MPUserProfile>({
       table: "dp_Users",
-      filter: `User_GUID = '${id}'`,
+      filter: `User_GUID = '${sanitizeGuid(id)}'`,
       select: "User_ID, User_GUID, Contact_ID_TABLE.First_Name,Contact_ID_TABLE.Nickname,Contact_ID_TABLE.Last_Name,Contact_ID_TABLE.Email_Address,Contact_ID_TABLE.Mobile_Phone,Contact_ID_TABLE.dp_fileUniqueId AS Image_GUID",
       top: 1
     });

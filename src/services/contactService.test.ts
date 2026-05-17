@@ -84,6 +84,7 @@ describe('ContactService', () => {
 
   describe('getContactByGuid', () => {
     const validGuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    const validButUnknownGuid = 'b2c3d4e5-f678-9012-3456-7890abcdef12';
 
     it('should return contact when found', async () => {
       const mockContact = { Contact_ID: 1, Contact_GUID: validGuid, First_Name: 'John' };
@@ -105,7 +106,7 @@ describe('ContactService', () => {
       mockGetTableRecords.mockResolvedValueOnce([]);
 
       const service = await ContactService.getInstance();
-      const result = await service.getContactByGuid(validGuid);
+      const result = await service.getContactByGuid(validButUnknownGuid);
 
       expect(result).toBeNull();
     });
