@@ -826,6 +826,7 @@ async function runInteractiveSetup(options: SetupOptions): Promise<number> {
   const totalSteps = 9;
   let passedSteps = 0;
   let warnings = 0;
+  let skippedSteps = 0;
   let failedSteps = 0;
 
   // Step 1: Node.js version check
@@ -1209,52 +1210,84 @@ async function runInteractiveSetup(options: SetupOptions): Promise<number> {
   } else {
     console.log(chalk.red('  ✗ Type generation failed'));
     if (!options.verbose && generateResult.output) {
-      console.log(chalk.gray(generateResult.output.slice(0, 500)));
+      // Show the last lines of output — the actual error appears at the end,
+      // after streamed progress like "Checking token validity..." / "Token expired, refreshing..."
+      const lines = generateResult.output.split('\n');
+      const lastLines = lines.slice(-20).join('\n');
+      console.log(chalk.gray(lastLines));
     }
+    console.log(
+      chalk.yellow(
+        '    Hint: verify MINISTRY_PLATFORM_BASE_URL and MINISTRY_PLATFORM_CLIENT_ID/SECRET in .env.local'
+      )
+    );
     failedSteps++;
   }
 
   // Step 9: Build validation
   printStepHeader(9, totalSteps, 'Building project');
-  console.log(chalk.gray('  Running npm run build...'));
 
-  const buildResult = await execCommandStreaming('npm', ['run', 'build'], options.verbose);
-
-  if (buildResult.success) {
-    console.log(chalk.green('  ✓ Build successful'));
-    passedSteps++;
+  if (!generateResult.success) {
+    console.log(
+      chalk.yellow(
+        '  ⚠ Skipped — type generation failed; building against stale models would mask the real problem'
+      )
+    );
+    console.log(chalk.gray('    Re-run `npm run setup` once the type generation error above is fixed.'));
+    skippedSteps++;
   } else {
-    console.log(chalk.red('  ✗ Build failed'));
-    if (!options.verbose && buildResult.output) {
-      // Show last part of output for build errors
-      const lines = buildResult.output.split('\n');
-      const lastLines = lines.slice(-20).join('\n');
-      console.log(chalk.gray(lastLines));
+    console.log(chalk.gray('  Running npm run build...'));
+
+    const buildResult = await execCommandStreaming('npm', ['run', 'build'], options.verbose);
+
+    if (buildResult.success) {
+      console.log(chalk.green('  ✓ Build successful'));
+      passedSteps++;
+    } else {
+      console.log(chalk.red('  ✗ Build failed'));
+      if (!options.verbose && buildResult.output) {
+        // Show last part of output for build errors
+        const lines = buildResult.output.split('\n');
+        const lastLines = lines.slice(-20).join('\n');
+        console.log(chalk.gray(lastLines));
+      }
+      failedSteps++;
     }
-    failedSteps++;
   }
 
   // Summary
-  console.log(chalk.bold.blue('\n\nSetup Complete!'));
-  console.log(chalk.blue('==============='));
+  const hasFailures = failedSteps > 0;
+  const headerText = hasFailures ? 'Setup Completed with Errors' : 'Setup Complete!';
+  const headerRule = '='.repeat(headerText.length);
+  const headerColor = hasFailures ? chalk.bold.red : chalk.bold.blue;
 
-  const totalChecks = passedSteps + failedSteps;
-  if (failedSteps === 0) {
+  console.log(headerColor(`\n\n${headerText}`));
+  console.log(headerColor(headerRule));
+
+  const totalChecks = passedSteps + failedSteps + skippedSteps;
+  if (!hasFailures && skippedSteps === 0) {
     console.log(chalk.green(`✓ ${passedSteps}/${totalChecks} steps passed`));
     if (warnings > 0) {
       console.log(chalk.yellow(`  (${warnings} warning${warnings > 1 ? 's' : ''})`));
     }
   } else {
-    console.log(
-      chalk.red(`✗ ${passedSteps}/${totalChecks} steps passed, ${failedSteps} failed`)
-    );
+    const parts: string[] = [`${passedSteps}/${totalChecks} steps passed`];
+    if (failedSteps > 0) parts.push(`${failedSteps} failed`);
+    if (skippedSteps > 0) parts.push(`${skippedSteps} skipped`);
+    console.log(chalk.red(`✗ ${parts.join(', ')}`));
   }
 
-  console.log(chalk.bold('\nNext steps:'));
-  console.log(chalk.white("  1. Run 'npm run dev' to start development server"));
-  console.log(chalk.white('  2. Visit http://localhost:3000'));
+  if (hasFailures) {
+    console.log(chalk.bold('\nTo recover:'));
+    console.log(chalk.white('  1. Review the failed step(s) above and address the underlying issue'));
+    console.log(chalk.white('  2. Re-run `npm run setup` once the issue is fixed'));
+  } else {
+    console.log(chalk.bold('\nNext steps:'));
+    console.log(chalk.white("  1. Run 'npm run dev' to start development server"));
+    console.log(chalk.white('  2. Visit http://localhost:3000'));
+  }
 
-  return failedSteps > 0 ? 1 : 0;
+  return hasFailures ? 1 : 0;
 }
 
 // ============================================================================
