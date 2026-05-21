@@ -72,15 +72,15 @@ Better Auth with Ministry Platform OAuth via genericOAuth plugin (`src/lib/auth.
 
 ## Prerequisites
 
-- **Node.js**: v18 or higher
+- **Node.js**: v20 LTS or higher (Next.js 16 and React 19 require a modern Node runtime)
 - **Package Manager**: npm (comes with Node.js)
 - **Ministry Platform**: Active instance with API credentials and OAuth client configured (see [OAuth Setup](#oauth-setup))
 
 ## Getting Started
 
-### Quick Setup with Claude Code
+### Quick Setup (Interactive)
 
-If you have [Claude Code](https://claude.ai/code) installed, the setup process is automated:
+Run `npm run setup` for an interactive guided setup, or follow the [Manual Setup](#manual-setup) steps below. The setup script is a plain Node/tsx script — [Claude Code](https://claude.ai/code) is **not** required.
 
 ```bash
 git clone https://github.com/MinistryPlatform-Community/MPNext.git
@@ -127,7 +127,10 @@ cd MPNext
 
 ```bash
 npm install
+npm update    # Apply non-breaking patch/minor updates (clears known npm audit warnings)
 ```
+
+> **Note**: The interactive `npm run setup` flow runs `npm update` automatically. If you skip it on a manual install, `npm audit` will report several moderate advisories from transitive dependencies that `npm update` resolves.
 
 #### 3. Environment Configuration
 
@@ -140,8 +143,8 @@ cp .env.example .env.local
 Update `.env.local` with your configuration:
 
 ```env
-# Better Auth Configuration
-OIDC_CLIENT_ID=MPNext
+# Better Auth Configuration (used for end-user OAuth login)
+OIDC_CLIENT_ID=TM.Widgets
 OIDC_CLIENT_SECRET=your_client_secret
 
 # Generate with: openssl rand -base64 32
@@ -150,7 +153,7 @@ BETTER_AUTH_SECRET=your_generated_secret
 # Update for production
 BETTER_AUTH_URL=http://localhost:3000
 
-# MinistryPlatform API Configuration
+# MinistryPlatform API Configuration (used for server-side API access)
 MINISTRY_PLATFORM_CLIENT_ID=MPNext
 MINISTRY_PLATFORM_CLIENT_SECRET=your_client_secret
 MINISTRY_PLATFORM_BASE_URL=https://your-instance.ministryplatform.com/ministryplatformapi
@@ -159,6 +162,8 @@ MINISTRY_PLATFORM_BASE_URL=https://your-instance.ministryplatform.com/ministrypl
 NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL=https://your-instance.ministryplatform.com/ministryplatformapi/files
 NEXT_PUBLIC_APP_NAME=App
 ```
+
+> **Note**: `OIDC_CLIENT_ID` and `MINISTRY_PLATFORM_CLIENT_ID` may be the same value or different. The example above uses the common pattern of sharing the `TM.Widgets` OAuth client for congregant-facing login and a scoped server-side client (`MPNext`) for API access. See the comments in `.env.example` for details.
 
 
 #### API Client Setup
@@ -205,9 +210,6 @@ https://yourdomain.com
 ```
 
 > **Important**: Post-logout redirect URIs are **required** for proper logout functionality. The application implements OIDC RP-initiated logout to properly end Ministry Platform OAuth sessions. Without these configured, users will be auto-logged back in after clicking "Sign out" (SSO behavior).
-
-##### Token Lifetimes (Default Settings)
-
 
 #### Generate Better Auth Secret
 
