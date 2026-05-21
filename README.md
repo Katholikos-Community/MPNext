@@ -92,13 +92,14 @@ npm run setup
 
 The interactive setup command will:
 1. Verify Node.js version (v20 LTS+ required)
-2. Check git status
-3. Create `.env.local` from `.env.example` (if needed)
-4. Prompt for missing environment variables
-5. Auto-generate `BETTER_AUTH_SECRET` (optional)
-6. Install and update dependencies
-7. Generate Ministry Platform types
-8. Run a production build to verify configuration
+2. Detect a template clone and offer to keep, reinitialize, or set a new git origin
+3. Check git status
+4. Create `.env.local` from `.env.example` (if needed)
+5. Prompt for missing environment variables — derives both `MINISTRY_PLATFORM_BASE_URL` and `NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL` from a single MP host input (avoiding the copy/paste mismatch risk in the [Manual Setup](#manual-setup) path), and offers to auto-generate `BETTER_AUTH_SECRET`
+6. Install dependencies (`npm install`)
+7. Apply non-breaking updates (`npm update`)
+8. Generate Ministry Platform types
+9. Run a production build to verify configuration
 
 **Additional setup options:**
 ```bash
