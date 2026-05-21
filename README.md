@@ -20,7 +20,7 @@ A modern Next.js application integrated with Ministry Platform authentication an
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
-  - [Quick Setup with Claude Code](#quick-setup-with-claude-code)
+  - [Quick Setup (Interactive)](#quick-setup-interactive)
   - [Manual Setup](#manual-setup)
   - [OAuth Setup](#oauth-setup)
 - [Project Structure](#project-structure)
@@ -32,6 +32,7 @@ A modern Next.js application integrated with Ministry Platform authentication an
 - [Claude Code Commands](#claude-code-commands)
 - [Documentation](#documentation)
 - [Code Style & Conventions](#code-style--conventions)
+- [Known Issues](#known-issues)
 
 ## Features
 
@@ -90,7 +91,7 @@ npm run setup
 ```
 
 The interactive setup command will:
-1. Verify Node.js version (v18+ required)
+1. Verify Node.js version (v20 LTS+ required)
 2. Check git status
 3. Create `.env.local` from `.env.example` (if needed)
 4. Prompt for missing environment variables
@@ -114,7 +115,7 @@ Once setup completes, run `npm run dev` and visit http://localhost:3000.
 
 ### Manual Setup
 
-If you prefer manual setup or don't have Claude Code:
+For a manual setup, follow these steps:
 
 #### 1. Clone the Repository
 
@@ -127,10 +128,10 @@ cd MPNext
 
 ```bash
 npm install
-npm update    # Apply non-breaking patch/minor updates (clears known npm audit warnings)
+npm update    # Apply non-breaking patch/minor updates (kept here to mirror the interactive setup flow)
 ```
 
-> **Note**: The interactive `npm run setup` flow runs `npm update` automatically. If you skip it on a manual install, `npm audit` will report several moderate advisories from transitive dependencies that `npm update` resolves.
+> **Note**: The interactive `npm run setup` flow runs `npm update` automatically. Running it here keeps the manual and automated flows aligned. `npm audit` will still report a small number of moderate advisories after install — see [Known Issues](#known-issues) for context.
 
 #### 3. Environment Configuration
 
@@ -801,6 +802,24 @@ import { getCurrentUserProfile } from '@/components/shared-actions/user';
    - Export all from respective `index.ts` files
 6. Access fields with special characters using bracket notation: `event["Allow_Check-in"]`
 7. **Run tests** before committing: `npm run test:run`
+
+## Known Issues
+
+### npm audit advisories (transitive `postcss` via Next.js 16)
+
+A fresh `npm install` reports **3 moderate** `npm audit` advisories. These chain through:
+
+```
+postcss < 8.5.10  →  next@16  →  better-auth
+```
+
+The vulnerable `postcss` version is transitively pinned by `next@16`. As a result:
+
+- **`npm update` does not clear them** — the constraint on `next` does not allow a `postcss` version with the fix.
+- **`npm audit fix --force` would break the app** — it downgrades `next` to a major version that is not compatible with this codebase.
+- **The interactive `npm run setup` flow does not clear them either** — it runs the same `npm install` + `npm update` sequence and produces the same lockfile.
+
+**Status**: waiting on an upstream Next.js patch release that bumps the bundled `postcss`. There is no safe local fix until then. The advisories do not affect runtime — `postcss` is a build-time CSS processor — and the application can be safely deployed with the warnings present.
 
 ## Contributing
 
