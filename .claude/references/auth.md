@@ -43,7 +43,8 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 | `src/proxy.ts` | Route protection (session cookie check) |
 | `src/contexts/user-context.tsx` | `UserProvider` — loads MP user profile client-side |
 | `src/contexts/session-context.tsx` | `useAppSession()` — thin wrapper around `authClient.useSession()` |
-| `src/components/layout/auth-wrapper.tsx` | Server component — redirects unauthenticated users |
+| `src/components/layout/auth-wrapper.tsx` | Server guard for the (web) group — redirects to `/signin` (no session) or `/session-error` (session without `userGuid`) |
+| `src/app/session-error/page.tsx` | Recovery page for broken sessions — provides a sign-out even when the header/menu can't render (outside the (web) group, so not self-guarded) |
 | `src/components/user-menu/actions.ts` | `handleSignOut()` — OIDC logout flow |
 | `src/app/signin/page.tsx` | Sign-in page — auto-redirects to OAuth |
 
@@ -78,16 +79,27 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 ### User Additional Fields
 
 ```typescript
+// Exported as `userAdditionalFields` from src/lib/auth.ts
 user: {
   additionalFields: {
     userGuid: {
       type: "string",
       required: false,
-      input: false,  // Cannot be set by users during signup
+      input: true,  // MUST be true — see warning below
     },
   },
 }
 ```
+
+> ⚠️ **`userGuid` MUST keep `input: true`.** It is populated server-side from the
+> OAuth profile via `mapProfileToUser`, **not** by user input. As of better-auth
+> **1.6**, `parseAdditionalUserInputFromProviderProfile` strips any additional
+> field declared with `input: false` *before creating the user record*. Setting
+> `input: false` therefore silently drops `userGuid` → `session.user.userGuid`
+> becomes `undefined` → every MP profile lookup fails (blank avatar, dead user
+> menu, `userId: null`). This regressed once during the 1.4→1.6 upgrade.
+> `src/auth.test.ts` guards it by running the real better-auth parse function
+> against the real field config. Do not "tighten" this back to `input: false`.
 
 ### customSession Callback
 
@@ -175,6 +187,24 @@ Uses `getSessionCookie()` from `better-auth/cookies` for fast cookie-only checks
 
 Everything else requires a valid session cookie. Missing cookie → redirect to `/signin`.
 
+## Broken-Session Recovery
+
+A session can authenticate successfully yet lack a `userGuid` (e.g. the
+better-auth 1.6 regression, or a future provider/config change). Without a
+`userGuid` the MP profile never loads, so `Header` renders its non-interactive
+fallback — no dropdown, and therefore **no way to sign out**. To prevent that
+dead end:
+
+- `AuthWrapper` treats a session with no `userGuid` as unusable and redirects to
+  `/session-error`.
+- `/session-error` (in `src/app/session-error/`, **outside** the `(web)` route
+  group so it isn't wrapped by `AuthWrapper`) renders a plain page with a
+  `handleSignOut` form button, giving the user an unconditional exit.
+- After sign-out the Better Auth cookie is cleared and the user is bounced to
+  MP's endsession endpoint, then back through `/signin` for a fresh login.
+
+Guarded by `src/components/layout/auth-wrapper.test.tsx`.
+
 ## Session Access Patterns
 
 ### Server Components
@@ -254,9 +284,33 @@ The following URLs must be configured in the Ministry Platform OAuth client:
 - **OAuth2 Callback URL**: `{APP_URL}/api/auth/oauth2/callback/ministry-platform`
 - **Post-Logout Redirect URI**: `{APP_URL}` (or `{APP_URL}/signin`)
 
+## Better Auth Upgrade Checklist
+
+`npm audit fix` and `npm update` can bump `better-auth` across **minor** versions
+(e.g. 1.4 → 1.6). Our CI (`build` + `lint` + unit tests) does **not** exercise a
+real OAuth login, so session/OAuth regressions ship silently. After any change to
+the `better-auth` version, do this before merging:
+
+1. **Read the changelog** between the old and new version, focusing on:
+   `genericOAuth`, `customSession`, `additionalFields`, cookie cache / session
+   serialization, and `mapProfileToUser`.
+2. **Run the auth tests**: `npm run test:run src/auth.test.ts` — the
+   `better-auth 1.6 guard` test verifies `userGuid` still survives provider-profile
+   parsing against the real library.
+3. **Manual smoke test (required — nothing else catches this):**
+   - `npm run dev`, sign in through Ministry Platform.
+   - Open `/api/auth/get-session` and confirm the session `user` object contains
+     **`userGuid`** (non-null) and **`userId`** (non-null).
+   - Confirm the header avatar renders and the user menu opens.
+   - Existing sessions predate the new user-record shape, so **sign out and log in
+     fresh** — don't test against a stale session.
+4. If `userGuid` is missing, check `parseAdditionalUserInputFromProviderProfile`
+   in `node_modules/better-auth/dist/db/schema.mjs` — the library may have changed
+   how additional fields flow from the OAuth profile into the user record.
+
 ## Known Limitations
 
-1. **No database**: In-memory adapter means all sessions are lost on server restart. Users must re-login after each restart. For production, configure a database adapter.
+1. **No database (top refactor priority)**: With no `database` in the config, Better Auth uses an in-memory adapter. Sessions live only in the in-memory store + cookies, so they are lost whenever the process restarts. On serverless/Vercel this is severe: **every cold start or new function instance has an empty session store**, so once the 1-hour JWT cookie cache expires, a request that lands on a fresh instance returns `null` and the user appears logged out (blank avatar / redirect to `/signin`) intermittently. This also makes auth bugs hard to reproduce. **Recommendation:** configure a persistent database adapter (e.g. a Vercel Marketplace Postgres/Neon, or SQLite for local dev) before relying on this in production.
 2. **mapProfileToUser type narrowness**: The genericOAuth TypeScript type for `mapProfileToUser` doesn't include `additionalFields`. The return must be cast to `Record<string, unknown>` for extra fields. The runtime code does pass them through correctly.
 3. **userGuid type cast**: `session.user.userGuid` requires a type cast because `customSessionClient` doesn't infer `additionalFields` from `genericOAuth`. This is a Better Auth type limitation.
 4. **Token refresh**: Not explicitly implemented. The `storeAccountCookie` stores refresh tokens, but automatic refresh behavior in stateless mode is unverified.
