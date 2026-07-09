@@ -43,7 +43,8 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 | `src/proxy.ts` | Route protection (session cookie check) |
 | `src/contexts/user-context.tsx` | `UserProvider` — loads MP user profile client-side |
 | `src/contexts/session-context.tsx` | `useAppSession()` — thin wrapper around `authClient.useSession()` |
-| `src/components/layout/auth-wrapper.tsx` | Server component — redirects unauthenticated users |
+| `src/components/layout/auth-wrapper.tsx` | Server guard for the (web) group — redirects to `/signin` (no session) or `/session-error` (session without `userGuid`) |
+| `src/app/session-error/page.tsx` | Recovery page for broken sessions — provides a sign-out even when the header/menu can't render (outside the (web) group, so not self-guarded) |
 | `src/components/user-menu/actions.ts` | `handleSignOut()` — OIDC logout flow |
 | `src/app/signin/page.tsx` | Sign-in page — auto-redirects to OAuth |
 
@@ -185,6 +186,24 @@ Uses `getSessionCookie()` from `better-auth/cookies` for fast cookie-only checks
 ### Protected Paths
 
 Everything else requires a valid session cookie. Missing cookie → redirect to `/signin`.
+
+## Broken-Session Recovery
+
+A session can authenticate successfully yet lack a `userGuid` (e.g. the
+better-auth 1.6 regression, or a future provider/config change). Without a
+`userGuid` the MP profile never loads, so `Header` renders its non-interactive
+fallback — no dropdown, and therefore **no way to sign out**. To prevent that
+dead end:
+
+- `AuthWrapper` treats a session with no `userGuid` as unusable and redirects to
+  `/session-error`.
+- `/session-error` (in `src/app/session-error/`, **outside** the `(web)` route
+  group so it isn't wrapped by `AuthWrapper`) renders a plain page with a
+  `handleSignOut` form button, giving the user an unconditional exit.
+- After sign-out the Better Auth cookie is cleared and the user is bounced to
+  MP's endsession endpoint, then back through `/signin` for a fresh login.
+
+Guarded by `src/components/layout/auth-wrapper.test.tsx`.
 
 ## Session Access Patterns
 
