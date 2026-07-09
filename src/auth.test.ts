@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { parseAdditionalUserInputFromProviderProfile } from 'better-auth/db';
+import { userAdditionalFields } from '@/lib/auth';
 
 /**
  * Auth Tests
@@ -184,6 +186,36 @@ describe('Auth - OAuth Configuration', () => {
     };
 
     expect(mappedFields.userGuid).toBe('ab12cd34-ef56-7890-abcd-ef1234567890');
+  });
+
+  /**
+   * Regression guard for the better-auth 1.6 upgrade incident.
+   *
+   * better-auth 1.6 changed `parseAdditionalUserInputFromProviderProfile` to
+   * strip any user additional field declared with `input: false` before the
+   * user record is created. Our `userGuid` field is populated server-side from
+   * the OAuth profile via `mapProfileToUser`, so `input: false` silently
+   * dropped it — leaving `session.user.userGuid` undefined and breaking every
+   * MP profile lookup (avatar, user menu, User_ID resolution).
+   *
+   * This test runs the REAL better-auth field-filtering function against our
+   * REAL field config, so it fails if either (a) someone flips `userGuid` back
+   * to `input: false`, or (b) a future better-auth upgrade changes how
+   * provider-profile fields are parsed. See .claude/references/auth.md.
+   */
+  it('persists userGuid from the OAuth provider profile (better-auth 1.6 guard)', () => {
+    const guid = 'ab12cd34-ef56-7890-abcd-ef1234567890';
+    const options = { user: { additionalFields: userAdditionalFields } };
+
+    // Mirrors the object better-auth builds from `mapProfileToUser`'s return
+    // before creating the user record.
+    const parsed = parseAdditionalUserInputFromProviderProfile(
+      options,
+      { userGuid: guid },
+      'create',
+    );
+
+    expect(parsed).toHaveProperty('userGuid', guid);
   });
 
   it('should distinguish user.id (Better Auth internal) from userGuid (MP User_GUID)', () => {

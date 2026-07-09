@@ -7,6 +7,26 @@ import { sanitizeGuid } from "@/lib/providers/ministry-platform/utils/filter-san
 
 const mpBaseUrl = process.env.MINISTRY_PLATFORM_BASE_URL!;
 
+/**
+ * Custom fields added to the Better Auth `user` record.
+ *
+ * `userGuid` (the MP User_GUID / OAuth `sub`) MUST keep `input: true`. It is
+ * populated server-side from the OAuth profile via `mapProfileToUser` below.
+ * As of better-auth 1.6, `parseAdditionalUserInputFromProviderProfile` strips
+ * any additional field declared with `input: false` BEFORE the user record is
+ * created — so `input: false` silently drops `userGuid`, which breaks every MP
+ * profile lookup (avatar, user menu, User_ID resolution). There is no
+ * user-facing form that sets this field, so allowing input carries no practical
+ * risk here. `src/auth.test.ts` guards this against future regressions.
+ */
+export const userAdditionalFields = {
+  userGuid: {
+    type: "string" as const,
+    required: false,
+    input: true,
+  },
+};
+
 // Process-wide cache of User_GUID → MP User_ID. customSession runs on every
 // getSession() call, so without a cache each request would do a dp_Users
 // lookup. Mapping is stable per user, so an unbounded Map is fine in practice.
@@ -51,13 +71,7 @@ const options = {
     storeAccountCookie: true,
   },
   user: {
-    additionalFields: {
-      userGuid: {
-        type: "string" as const,
-        required: false,
-        input: false,
-      },
-    },
+    additionalFields: userAdditionalFields,
   },
   plugins: [
     genericOAuth({
