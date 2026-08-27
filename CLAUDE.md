@@ -224,7 +224,7 @@ await mp.createTableRecords('Contact_Log', records, {
 ## Testing
 
 - **Framework**: Vitest with jsdom environment, `@testing-library/react` for hooks/components, v8 coverage
-- **Config**: `vitest.config.ts` (runner), `src/test-setup.ts` (env vars + jest-dom)
+- **Config**: `vitest.config.mts` (runner), `src/test-setup.ts` (env vars + jest-dom)
 - **Co-location**: Test files live next to source — `foo.ts` → `foo.test.ts`
 - **Critical**: Use `vi.hoisted()` for any mock variables referenced inside `vi.mock()` factories (hoisting causes `ReferenceError` otherwise)
 - **MPHelper mock**: Use mock class (`MPHelper: class { method = mockFn; }`), not `vi.fn().mockImplementation()`

@@ -246,4 +246,9 @@ entanglement is inherent to those upstream packages, so the guard is the fix, no
 | Item | Detail | Raised |
 |---|---|---|
 | `pkce: false` in `src/lib/auth.ts` | Not a dependency issue, but a live security posture item: MP discovery advertises `S256`, so PKCE can likely be enabled. Needs its own change + test. | 2026-08-21 |
-| `vitest.config.ts` CJS/ESM warning | Vite 8 warns the config uses ESM syntax while loaded as CommonJS and that `configLoader: 'native'` will become the default. Pre-existing. Fix: rename to `vitest.config.mts`. | 2026-08-21 |
+
+### Resolved
+
+| Item | Outcome | Date |
+|---|---|---|
+| `vitest.config.ts` CJS/ESM warning | **Fixed** — renamed to `vitest.config.mts`, so Vite loads it as native ESM and the `configLoader: 'native'` warning is gone. Not a pure rename: the config used `__dirname`, which does not exist in an ESM `.mts` file, so the `@` alias would have silently resolved wrong. It now uses `fileURLToPath(new URL('./src', import.meta.url))` — `fileURLToPath` specifically, because `new URL(...).pathname` yields `/S:/MP/MPNext/src` on Windows. `tsconfig.json` also needed `**/*.mts` added to `include`, since `**/*.ts` does not match `.mts` and the config would otherwise have dropped out of type checking. Verified: 582/582 tests, coverage thresholds still enforced, build and lint clean. | 2026-08-27 |

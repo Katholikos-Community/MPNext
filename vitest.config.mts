@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
-import path from 'path';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
   plugins: [react()],
@@ -81,7 +81,11 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      // `__dirname` does not exist in an ESM `.mts` config — resolve the alias
+      // from this file's own URL instead. `fileURLToPath` (rather than
+      // `new URL(...).pathname`) is what keeps this correct on Windows, where
+      // a raw pathname comes back as `/S:/MP/MPNext/src`.
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
 });

@@ -27,7 +27,7 @@ Three things matter more than the headline number:
 
 | Finding | Status |
 |---|---|
-| **Measurement was inflated ~2.2×.** With no explicit `coverage.include`, every file no test imported dropped out of the denominator. | **Fixed.** `vitest.config.ts` now sets an explicit `include`, plus per-glob `thresholds` that fail the run on regression. |
+| **Measurement was inflated ~2.2×.** With no explicit `coverage.include`, every file no test imported dropped out of the denominator. | **Fixed.** `vitest.config.mts` now sets an explicit `include`, plus per-glob `thresholds` that fail the run on regression. |
 | **`testing.md` claimed 95.39% coverage** — not reproducible under any configuration. | **Fixed.** Rewritten against measured numbers, with the new mock patterns documented. |
 | **Coverage was pointed away from the risk.** Two `'use server'` actions have no session check at all, and both sat at 100% line coverage. | **Documented, then fixed.** §5.1 (filter injection), §5.2/§5.3 (missing auth) and §5.4/§5.5 (missing authz, duplicated User_ID lookup) are closed. §5.6 (N+1 lookup) is closed. §5.7 remains open in `.claude/TODO/`. |
 
@@ -78,7 +78,7 @@ callback and never exposes it, so this was the only way to unit test the logic s
 
 ### Config
 
-`vitest.config.ts` gained an explicit `coverage.include`, an exclude for `src/components/ui/`, and
+`vitest.config.mts` gained an explicit `coverage.include`, an exclude for `src/components/ui/`, and
 per-glob `thresholds`. The threshold gate was verified to fail (exit 1) when breached, not just to
 pass when satisfied.
 
@@ -311,7 +311,7 @@ failing an assertion. `installJsdomPolyfills()` in that test file is the pattern
 remaining component gaps below.
 
 Full render coverage was not chased — deliberately. These are the write-path tests, not a coverage
-exercise, and the component stays ungated in `vitest.config.ts` thresholds.
+exercise, and the component stays ungated in `vitest.config.mts` thresholds.
 
 ### Other component gaps 🟡
 

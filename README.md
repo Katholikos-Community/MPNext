@@ -410,7 +410,7 @@ MPNext/
 ├── coverage/                             # Test coverage reports
 ├── .env.example                          # Environment template
 ├── CLAUDE.md                             # Development guide
-├── vitest.config.ts                      # Vitest configuration
+├── vitest.config.mts                      # Vitest configuration
 ├── components.json                       # shadcn/ui configuration
 ├── next.config.ts                        # Next.js configuration
 ├── tailwind.config.js                    # Tailwind CSS configuration
@@ -592,7 +592,7 @@ npm run test:coverage
 
 ### Test Configuration
 
-Tests are configured in `vitest.config.ts`:
+Tests are configured in `vitest.config.mts`:
 - Environment variables stubbed in `src/test-setup.ts`
 - Auto-generated models excluded from coverage
 - Supports TypeScript path aliases

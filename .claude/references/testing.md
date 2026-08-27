@@ -10,7 +10,7 @@ MPNext uses **Vitest** with **jsdom** environment, **@testing-library/react** fo
 
 | File | Purpose |
 |------|---------|
-| `vitest.config.ts` | Test runner config (jsdom, globals, coverage, path aliases) |
+| `vitest.config.mts` | Test runner config (jsdom, globals, coverage, path aliases) |
 | `src/test-setup.ts` | Global setup: mocked env vars + `@testing-library/jest-dom` |
 
 ### Commands
@@ -370,7 +370,7 @@ npx vitest run --coverage --coverage.reportOnFailure   # also report when tests 
 
 ### The `include` glob is load-bearing
 
-`vitest.config.ts` sets `coverage.include: ['src/**/*.{ts,tsx}']`. Without an
+`vitest.config.mts` sets `coverage.include: ['src/**/*.{ts,tsx}']`. Without an
 explicit `include`, v8 reports only on files that some test imported, so every
 untested file drops out of the denominator - the repo once reported 71.6% while
 true statement coverage was 32.7%. Do not remove it.
