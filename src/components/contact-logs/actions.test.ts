@@ -558,4 +558,64 @@ describe('contact-logs actions', () => {
       expect(mockGetContactLogById).toHaveBeenCalledWith(42);
     });
   });
+
+  describe('Logging safety (F5)', () => {
+    // Pastoral notes and record content must never reach info-level logs, and
+    // an error log must never echo them either. See
+    // .claude/references/auth.md § Logging policy.
+    let logSpy: ReturnType<typeof vi.fn>;
+    let errorSpy: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    const sensitiveNotes = 'Confidential: disclosed a personal crisis in confidence';
+
+    it('should not log Notes when creating a contact log succeeds', async () => {
+      mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
+
+      await createContactLog({ ...validCreateInput, Notes: sensitiveNotes });
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('should not log Notes when creating a contact log fails', async () => {
+      mockCreateContactLog.mockRejectedValueOnce(new Error('MP write failed'));
+
+      await expect(
+        createContactLog({ ...validCreateInput, Notes: sensitiveNotes })
+      ).rejects.toThrow('MP write failed');
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const loggedArgs = errorSpy.mock.calls[0].map(String).join(' ');
+      expect(loggedArgs).not.toContain(sensitiveNotes);
+    });
+
+    it('should not log Notes when updating a contact log fails', async () => {
+      mockUpdateContactLog.mockRejectedValueOnce(new Error('MP write failed'));
+
+      await expect(
+        updateContactLog(1, { Notes: sensitiveNotes })
+      ).rejects.toThrow('MP write failed');
+
+      expect(logSpy).not.toHaveBeenCalled();
+      const loggedArgs = errorSpy.mock.calls
+        .map((args: unknown[]) => args.map(String).join(' '))
+        .join(' ');
+      expect(loggedArgs).not.toContain(sensitiveNotes);
+    });
+
+    it('should not log anything when deleting a contact log succeeds', async () => {
+      mockDeleteContactLog.mockResolvedValueOnce(undefined);
+
+      await deleteContactLog(1);
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -15,13 +15,9 @@ export class TableService {
             try {
                 await this.client.ensureValidToken();
 
-                console.log('Fetching records from table:', table);
-                console.log('Query Params:', params);
-
                 const endpoint = `/tables/${encodeURIComponent(table)}`;
                 const data = await this.client.getHttpClient().get<T[]>(endpoint, params as QueryParams);
-        
-                console.log('Fetched records:', data);
+
                 return data;
             } catch (error) {
                 console.error(`Error fetching records from table ${table}:`, error);
@@ -33,8 +29,8 @@ export class TableService {
      * Creates new records in the specified table.
      */
     public async createTableRecords<T extends TableRecord = TableRecord>(
-        table: string, 
-        records: T[], 
+        table: string,
+        records: T[],
         params?: Pick<TableQueryParams, '$select' | '$userId'>
     ): Promise<T[]> {
         try {
@@ -52,8 +48,8 @@ export class TableService {
      * Updates provided records in the specified table.
      */
     public async updateTableRecords<T extends TableRecord = TableRecord>(
-        table: string, 
-        records: T[], 
+        table: string,
+        records: T[],
         params?: Pick<TableQueryParams, '$select' | '$userId' | '$allowCreate'>
     ): Promise<T[]> {
         try {
@@ -71,8 +67,8 @@ export class TableService {
      * Deletes multiple records from the specified table.
      */
     public async deleteTableRecords<T extends TableRecord = TableRecord>(
-        table: string, 
-        ids: number[], 
+        table: string,
+        ids: number[],
         params?: Pick<TableQueryParams, '$select' | '$userId'>
     ): Promise<T[]> {
         try {
@@ -81,7 +77,7 @@ export class TableService {
             // Combine the ids and other params
             const queryParams = { ...params, id: ids };
             const endpoint = `/tables/${encodeURIComponent(table)}`;
-            
+
             const result = await this.client.getHttpClient().delete<T[]>(endpoint, queryParams);
             return result;
         } catch (error) {

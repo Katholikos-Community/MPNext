@@ -28,18 +28,14 @@ function SignInContent() {
   const callbackUrl = sanitizeCallbackUrl(searchParams?.get("callbackUrl"));
   const [isRedirecting, setIsRedirecting] = useState(false);
 
-  console.log("SignIn Page rendered with callbackUrl:", callbackUrl);
-
   useEffect(() => {
     // Check if user is already signed in
     authClient.getSession().then(({ data: session }) => {
       if (session) {
         // User is already signed in, redirect to callback URL
-        console.log("User is already signed in, redirecting to callback URL:", callbackUrl);
         window.location.href = callbackUrl;
       } else if (!isRedirecting) {
         // User is not signed in, initiate sign in
-        console.log("Redirecting to SignIn API");
         setIsRedirecting(true);
         // better-auth 1.7 routes generic OAuth providers through the standard
         // social sign-in path; `signIn.oauth2()` was removed.
