@@ -1,7 +1,7 @@
 import { ContactSearch } from "@/lib/dto";
 import { MPHelper } from "@/lib/providers/ministry-platform";
 import { sanitizeLikeValue, sanitizeGuid } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
-import { SessionContextService } from "@/services/sessionContextService";
+import { AuthorizationService } from "@/services/authorizationService";
 
 /**
  * ContactService - Singleton service for managing contact-related operations
@@ -9,6 +9,15 @@ import { SessionContextService } from "@/services/sessionContextService";
  * This service provides methods to interact with contact data from Ministry Platform,
  * including searching for contacts and retrieving individual contact information.
  * Uses the singleton pattern to ensure a single instance across the application.
+ *
+ * ## Authorization
+ *
+ * Every method here — reads included — goes through `AuthorizationService`, so
+ * a caller that bypasses the gated server actions still cannot reach MP data
+ * without an MP security role. MP data is fetched with this app's
+ * client-credentials service account, so MP's own per-user record security
+ * never applies; this gate is the only thing that does. See
+ * `.claude/references/auth.md` § Authorization.
  */
 export class ContactService {
   private static instance: ContactService;
@@ -52,8 +61,14 @@ export class ContactService {
    * 
    * @param search - The search term to match against contact fields
    * @returns Promise<ContactSearch[]> - Array of matching contacts (limited to 20 results)
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async contactSearch(search: string): Promise<ContactSearch[]> {
+    await AuthorizationService.getInstance().requireSecurityRole({
+      table: "Contacts",
+      operation: "read",
+    });
+
     const term = sanitizeLikeValue(search);
     const filter = ["First_Name", "Last_Name", "Nickname", "Email_Address", "Mobile_Phone"]
       .map((col) => `${col} LIKE '%${term}%' ESCAPE '\\'`)
@@ -73,8 +88,14 @@ export class ContactService {
    * 
    * @param contactGuid - The unique GUID identifier for the contact
    * @returns Promise<ContactSearch | null> - The matching contact record or null if not found
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async getContactByGuid(contactGuid: string): Promise<ContactSearch | null> {
+    await AuthorizationService.getInstance().requireSecurityRole({
+      table: "Contacts",
+      operation: "read",
+    });
+
     const records = await this.mp!.getTableRecords<ContactSearch>({
       table: "Contacts",
       filter: `Contact_GUID = '${sanitizeGuid(contactGuid)}'`,
@@ -92,6 +113,7 @@ export class ContactService {
    * @param contactId - The Contact_ID of the contact to update
    * @param fields - Partial object containing the fields to update (Email_Address, Mobile_Phone)
    * @returns Promise<void>
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async updateContact(
     contactId: number,
@@ -99,15 +121,16 @@ export class ContactService {
   ): Promise<void> {
     const record = { Contact_ID: contactId, ...fields };
 
-    const $userId = await SessionContextService.getInstance().getActingUserIdForWrite({
+    // F10 (2026-09-12): this write previously took its acting user straight from
+    // SessionContextService, which logs and proceeds when none resolves — so an
+    // unattributed, unauthorized update to Contacts would have gone through. The
+    // gate routes through the same service (the `mp.write.non_user` warning is
+    // still emitted) and then refuses.
+    const $userId = await AuthorizationService.getInstance().requireSecurityRole({
       table: "Contacts",
       operation: "update",
     });
 
-    await this.mp!.updateTableRecords(
-      "Contacts",
-      [record],
-      $userId !== null ? { $userId } : undefined
-    );
+    await this.mp!.updateTableRecords("Contacts", [record], { $userId });
   }
 }

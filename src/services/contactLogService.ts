@@ -4,7 +4,7 @@ import { ContactLogSchema, ContactLogInput } from "@/lib/providers/ministry-plat
 import { MPHelper } from "@/lib/providers/ministry-platform";
 import { sanitizeNumericId } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
 import { DomainTimezoneService } from "@/services/domainTimezoneService";
-import { SessionContextService } from "@/services/sessionContextService";
+import { AuthorizationService } from "@/services/authorizationService";
 
 /**
  * ContactLogService - Singleton service for managing contact log operations
@@ -12,6 +12,14 @@ import { SessionContextService } from "@/services/sessionContextService";
  * This service provides methods to interact with contact log data from Ministry Platform,
  * including searching, retrieving, creating, updating, and deleting contact log records.
  * Uses the singleton pattern to ensure a single instance across the application.
+ *
+ * ## Authorization
+ *
+ * Every method here — reads included — goes through `AuthorizationService`, so
+ * a caller that bypasses the gated server actions still cannot reach contact
+ * logs without an MP security role. Writes take their `$userId` attribution
+ * from the gate's return value rather than resolving the acting user
+ * separately. See `.claude/references/auth.md` § Authorization.
  */
 export class ContactLogService {
   private static instance: ContactLogService;
@@ -53,8 +61,14 @@ export class ContactLogService {
    * Retrieves all contact log types
    * 
    * @returns Promise<ContactLogTypes[]> - Array of all contact log type records
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async getContactLogTypes(): Promise<ContactLogTypes[]> {
+    await AuthorizationService.getInstance().requireSecurityRole({
+      table: "Contact_Log_Types",
+      operation: "read",
+    });
+
     const records = await this.mp!.getTableRecords<ContactLogTypes>({
       table: "Contact_Log_Types",
       select: "Contact_Log_Type_ID,Contact_Log_Type,Description",
@@ -72,8 +86,14 @@ export class ContactLogService {
    * @param limit - Maximum number of records to return (default: 50)
    * @returns Promise<ContactLog[]> - Array of matching contact log records
    * @throws Error if contactId is supplied but is not a positive integer ID
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async searchContactLogs(contactId?: number, limit: number = 50): Promise<ContactLog[]> {
+    await AuthorizationService.getInstance().requireSecurityRole({
+      table: "Contact_Log",
+      operation: "read",
+    });
+
     let filter = "";
 
     if (contactId !== undefined && contactId !== null) {
@@ -97,8 +117,14 @@ export class ContactLogService {
    * @param contactLogId - The unique ID of the contact log record
    * @returns Promise<ContactLog | null> - The matching contact log record or null if not found
    * @throws Error if contactLogId is not a positive integer ID
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async getContactLogById(contactLogId: number): Promise<ContactLog | null> {
+    await AuthorizationService.getInstance().requireSecurityRole({
+      table: "Contact_Log",
+      operation: "read",
+    });
+
     const records = await this.mp!.getTableRecords<ContactLog>({
       table: "Contact_Log",
       filter: `Contact_Log_ID = ${sanitizeNumericId(contactLogId, "Contact Log ID")}`,
@@ -115,8 +141,14 @@ export class ContactLogService {
    * @param contactId - The contact ID to get logs for
    * @returns Promise<ContactLog[]> - Array of contact log records for the contact
    * @throws Error if contactId is not a positive integer ID
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async getContactLogsByContactId(contactId: number): Promise<ContactLog[]> {
+    await AuthorizationService.getInstance().requireSecurityRole({
+      table: "Contact_Log",
+      operation: "read",
+    });
+
     const records = await this.mp!.getTableRecords<ContactLog>({
       table: "Contact_Log",
       filter: `Contact_ID = ${sanitizeNumericId(contactId, "Contact ID")}`,
@@ -133,6 +165,7 @@ export class ContactLogService {
    * @param contactLogData - The contact log data to create
    * @param schema - Optional Zod schema for runtime validation (defaults to ContactLogSchema)
    * @returns Promise<ContactLog> - The created contact log record
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async createContactLog(
     contactLogData: Omit<ContactLogInput, 'Contact_Log_ID'>,
@@ -151,7 +184,7 @@ export class ContactLogService {
     const mpDate = await tz.toMpSqlDatetime(Contact_Date);
     console.log('ContactLogService.createContactLog - MP-TZ SQL date:', mpDate);
 
-    const $userId = await SessionContextService.getInstance().getActingUserIdForWrite({
+    const $userId = await AuthorizationService.getInstance().requireSecurityRole({
       table: "Contact_Log",
       operation: "create",
     });
@@ -159,7 +192,7 @@ export class ContactLogService {
     const result = await this.mp!.createTableRecords(
       "Contact_Log",
       [{ ...validatedRest, Contact_Date: mpDate }],
-      $userId !== null ? { $userId } : undefined
+      { $userId }
     );
 
     if (!result || result.length === 0) {
@@ -175,6 +208,7 @@ export class ContactLogService {
    * @param contactLogId - The ID of the contact log record to update
    * @param contactLogData - The updated contact log data (partial)
    * @returns Promise<ContactLog> - The updated contact log record
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async updateContactLog(
     contactLogId: number,
@@ -202,7 +236,7 @@ export class ContactLogService {
       ...(mpDate !== undefined ? { Contact_Date: mpDate } : {}),
     };
 
-    const $userId = await SessionContextService.getInstance().getActingUserIdForWrite({
+    const $userId = await AuthorizationService.getInstance().requireSecurityRole({
       table: "Contact_Log",
       operation: "update",
     });
@@ -210,7 +244,7 @@ export class ContactLogService {
     const result = await this.mp!.updateTableRecords(
       "Contact_Log",
       [updateData],
-      $userId !== null ? { $userId } : undefined
+      { $userId }
     );
 
     if (!result || result.length === 0) {
@@ -225,20 +259,17 @@ export class ContactLogService {
    * 
    * @param contactLogId - The ID of the contact log record to delete
    * @returns Promise<void>
+   * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async deleteContactLog(contactLogId: number): Promise<void> {
     console.log('ContactLogService.deleteContactLog - Deleting log:', contactLogId);
 
-    const $userId = await SessionContextService.getInstance().getActingUserIdForWrite({
+    const $userId = await AuthorizationService.getInstance().requireSecurityRole({
       table: "Contact_Log",
       operation: "delete",
     });
 
-    await this.mp!.deleteTableRecords(
-      "Contact_Log",
-      [contactLogId],
-      $userId !== null ? { $userId } : undefined
-    );
+    await this.mp!.deleteTableRecords("Contact_Log", [contactLogId], { $userId });
     
     console.log('ContactLogService.deleteContactLog - Successfully deleted');
   }

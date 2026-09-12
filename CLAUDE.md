@@ -183,7 +183,8 @@ export default MyComponent;            // ❌ Avoid
 7. **Use TypeScript strict mode** - all code must be type-safe
 8. **Validate at API boundaries** - use Zod schemas with the `schema` parameter in `createTableRecords()` and `updateTableRecords()` for runtime validation
 9. **Use service classes in server actions** - call services from `src/services/`, not MPHelper directly from components or actions
-10. **Convert all date/time values at the MP boundary** - use `DomainTimezoneService` (never raw `new Date(x).toISOString()` or `getFullYear()`) when sending or receiving datetime fields, since MP stores wall-clock values in the domain's time zone, not UTC. See **[Date/Time Handling Reference](.claude/references/ministryplatform.datetimehandling.md)**.
+10. **Authorize, don't just authenticate** - feature server actions AND service methods that touch Ministry Platform data must call `AuthorizationService` (`requireSecurityRole`, for reads as well as writes), never a bare `auth.api.getSession()` check. A session proves only that some MP user signed in; all MP data is fetched with the app's service account, so the role gate is the only thing that decides who may see or change it. See **[Auth Reference](.claude/references/auth.md)** § Authorization.
+11. **Convert all date/time values at the MP boundary** - use `DomainTimezoneService` (never raw `new Date(x).toISOString()` or `getFullYear()`) when sending or receiving datetime fields, since MP stores wall-clock values in the domain's time zone, not UTC. See **[Date/Time Handling Reference](.claude/references/ministryplatform.datetimehandling.md)**.
 
 ## Validation Best Practices
 

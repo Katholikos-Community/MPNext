@@ -1,10 +1,11 @@
+import { cache } from "react";
 import { MPHelper } from "@/lib/providers/ministry-platform";
 import { sanitizeNumericId } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
 import { SessionContextService } from "@/services/sessionContextService";
 
 /**
  * Thrown when the acting user is authenticated but not permitted to perform
- * the requested Ministry Platform write.
+ * the requested Ministry Platform operation.
  *
  * Distinct from the generic `Error` the actions throw for authentication and
  * argument problems so callers (and tests) can tell "you are not signed in"
@@ -17,26 +18,59 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/** The MP operations this gate distinguishes. `read` is gated as of F1. */
+export type MpOperation = "read" | "create" | "update" | "delete";
+
+/** Why a request was refused. Stable strings — logs and alerts grep on them. */
+export type DenialReason = "no_mp_user" | "no_security_role" | "role_not_permitted";
+
+export interface AuthorizationContext {
+  table: string;
+  operation: MpOperation;
+}
+
+export interface AuthorizationDecision {
+  /** True when the acting user may perform `operation` on `table`. */
+  permitted: boolean;
+  /** The acting MP `User_ID`, or null when none could be resolved. */
+  userId: number | null;
+  /** Null when permitted; otherwise why the request was refused. */
+  reason: DenialReason | null;
+}
+
 /**
- * Env var naming the MP security roles permitted to perform gated writes,
- * comma-separated (e.g. `MP_WRITE_SECURITY_ROLES="Administrators,Pastoral Staff"`).
+ * Env var naming the MP security roles permitted to perform gated operations,
+ * comma-separated (e.g. `MP_SECURITY_ROLES="Administrators,Pastoral Staff"`).
  *
  * Unset or empty means "any MP security role" — the decided default policy.
  * Set it to tighten the gate without a code change.
  */
-const REQUIRED_ROLES_ENV = "MP_WRITE_SECURITY_ROLES";
+const SECURITY_ROLES_ENV = "MP_SECURITY_ROLES";
+
+/**
+ * Deprecated predecessor of {@link SECURITY_ROLES_ENV}, read only when the
+ * general var is unset or blank. It restricted writes only; the policy now
+ * covers reads too, so the name no longer describes what it does. Deployments
+ * that still set it keep working unchanged.
+ */
+const LEGACY_SECURITY_ROLES_ENV = "MP_WRITE_SECURITY_ROLES";
 
 function normalizeRoleName(role: string): string {
   return role.trim().toLowerCase();
 }
 
 /**
- * Parses `MP_WRITE_SECURITY_ROLES` into normalized role names, or returns null
- * when unset/blank, which means "holding any MP security role is sufficient".
- * Read per call rather than at module load so tests and redeploys see changes.
+ * Parses the role allow-list into normalized role names, or returns null when
+ * unset/blank, which means "holding any MP security role is sufficient".
+ *
+ * `MP_SECURITY_ROLES` wins; `MP_WRITE_SECURITY_ROLES` is the deprecated
+ * fallback. Read per call rather than at module load so tests and redeploys
+ * see changes.
  */
 function parseRequiredRoles(): string[] | null {
-  const raw = process.env[REQUIRED_ROLES_ENV];
+  const raw =
+    process.env[SECURITY_ROLES_ENV]?.trim() ||
+    process.env[LEGACY_SECURITY_ROLES_ENV]?.trim();
   if (!raw) return null;
   const names = raw
     .split(",")
@@ -46,24 +80,49 @@ function parseRequiredRoles(): string[] | null {
 }
 
 /**
- * AuthorizationService — decides whether the acting user may perform a
- * Ministry Platform write.
+ * Per-REQUEST memoization of the `dp_User_Roles` read, keyed by `User_ID`.
  *
- * Policy (decided 2026-08-21, see `.claude/references/auth.md`): any
- * authenticated user who holds an MP security role may create, edit, and
- * delete contact logs — including logs another user created. MP security roles
- * are the domain's own authorization mechanism, so this app defers to them
- * rather than inventing a parallel one. Ownership (`Made_By`) is deliberately
- * NOT a factor: staff need to be able to correct and remove each other's logs.
+ * The gate runs at up to three layers per request (page/layout, server action,
+ * service method), and each layer must be able to call it without knowing
+ * whether another already did. React's `cache()` scopes the memo to a single
+ * server request, so those three calls cost one MP read — and nothing is
+ * carried across requests, which is what keeps a revoked role effective on the
+ * user's very next request.
  *
- * Authentication alone is not sufficient. A session for an MP user with no
- * security role at all cannot write, and neither can a session whose MP
- * `User_ID` never resolved — the gate fails closed.
+ * Outside a React request scope (Vitest, a plain Node script) `cache()` is a
+ * passthrough: React's implementation calls through when no cache dispatcher
+ * is installed. Tests therefore see the uncached behavior, which is why the
+ * "does not cache across calls" assertions below still hold.
  *
- * No caching. Roles are re-read from MP on every gated write, one extra read
- * per write. Writes are rare (a staff member saving a form) and a cached
- * authorization decision means a revoked role keeps working; that trade is not
- * worth making for a shared production database.
+ * This is deliberately NOT a module-level or time-based cache. See
+ * `.claude/references/auth.md` § Authorization.
+ */
+const loadSecurityRoles = cache(
+  async (userId: number): Promise<string[]> =>
+    AuthorizationService.getInstance().readSecurityRolesFromMp(userId),
+);
+
+/**
+ * AuthorizationService — decides whether the acting user may read from or
+ * write to Ministry Platform through this app.
+ *
+ * Policy (extended to reads 2026-09-12, closing F1; writes decided 2026-08-21 —
+ * see `.claude/references/auth.md`): any authenticated user who holds an MP
+ * security role may use the contact features; a user with no security role may
+ * sign in and see the app shell but may neither read nor write contact data.
+ * MP security roles are the domain's own authorization mechanism, so this app
+ * defers to them rather than inventing a parallel one. Ownership (`Made_By`)
+ * is deliberately NOT a factor: staff need to be able to correct and remove
+ * each other's logs.
+ *
+ * Why reads need a gate at all: MP's OIDC endpoint authenticates ANY
+ * `dp_Users` record, and this app fetches all MP data with its own
+ * client-credentials service account (`dataplatform/scopes/all`), so MP's
+ * per-user record security never applies to what we return. Authentication
+ * alone is therefore not sufficient for a read either.
+ *
+ * The gate fails closed: a session whose MP `User_ID` never resolved is
+ * refused, as is one whose role list cannot be established.
  */
 export class AuthorizationService {
   private static instance: AuthorizationService | null = null;
@@ -91,29 +150,16 @@ export class AuthorizationService {
   }
 
   /**
-   * Returns the MP security role names held by a user.
+   * Reads the MP security role names held by a user, bypassing the per-request
+   * memo. Internal seam for {@link loadSecurityRoles} — callers should use
+   * {@link getSecurityRoles}.
    *
-   * @param userId - MP `User_ID` (must be a positive integer)
-   * @returns Role names from `dp_User_Roles`; empty when the user holds none
+   * @internal
    */
-  public async getSecurityRoles(userId: number): Promise<string[]> {
-    // `sanitizeNumericId` is the single source of truth for the numeric-ID rule
-    // (see filter-sanitize.ts) and guards the interpolation below. Its plain
-    // Error is re-thrown as UnauthorizedError: an unusable acting User_ID means
-    // we cannot establish permission, so it must fail closed as an authz denial
-    // rather than surface as a generic validation error.
-    let safeUserId: number;
-    try {
-      safeUserId = sanitizeNumericId(userId, "acting MP User_ID");
-    } catch {
-      throw new UnauthorizedError(
-        "Not authorized: acting MP User_ID is not a valid identifier",
-      );
-    }
-
+  public async readSecurityRolesFromMp(userId: number): Promise<string[]> {
     const records = await this.helper().getTableRecords<{ Role_Name: string | null }>({
       table: "dp_User_Roles",
-      filter: `User_ID = ${safeUserId}`,
+      filter: `User_ID = ${userId}`,
       select: "Role_ID_TABLE.Role_Name",
     });
 
@@ -123,28 +169,58 @@ export class AuthorizationService {
   }
 
   /**
-   * Gates an MP write on security-role membership and returns the acting
-   * user's MP `User_ID` so callers can use it for attribution.
+   * Returns the MP security role names held by a user, memoized per request.
    *
-   * Resolves the acting user through `SessionContextService`, so an
-   * unattributed write still emits the structured `mp.write.non_user` warning
-   * before this gate rejects it — the attempt stays visible in production logs.
-   *
-   * @throws UnauthorizedError when no MP user is attached to the session, or
-   *         when the user holds no permitted security role
+   * @param userId - MP `User_ID` (must be a positive integer)
+   * @returns Role names from `dp_User_Roles`; empty when the user holds none
    */
-  public async requireSecurityRoleForWrite(ctx: {
-    table: string;
-    operation: "create" | "update" | "delete";
-  }): Promise<number> {
-    const userId = await SessionContextService.getInstance()
-      .getActingUserIdForWrite(ctx);
+  public async getSecurityRoles(userId: number): Promise<string[]> {
+    // `sanitizeNumericId` is the single source of truth for the numeric-ID rule
+    // (see filter-sanitize.ts) and guards the interpolation below. Its plain
+    // Error is re-thrown as UnauthorizedError: an unusable acting User_ID means
+    // we cannot establish permission, so it must fail closed as an authz denial
+    // rather than surface as a generic validation error. Validated BEFORE the
+    // memo so a bad ID can never be cached as a key.
+    let safeUserId: number;
+    try {
+      safeUserId = sanitizeNumericId(userId, "acting MP User_ID");
+    } catch {
+      throw new UnauthorizedError(
+        "Not authorized: acting MP User_ID is not a valid identifier",
+      );
+    }
+
+    return loadSecurityRoles(safeUserId);
+  }
+
+  /**
+   * Non-throwing form of the gate. Returns the decision and the acting user's
+   * MP `User_ID` without logging a denial — use it to compute UI affordances
+   * (e.g. `canAccessContactFeatures`), never as the enforcement point.
+   *
+   * Infrastructure failures (MP unreachable, an unusable acting `User_ID`) are
+   * still thrown rather than reported as `permitted: false`, so a caller can
+   * never mistake "MP is down" for "this user is not allowed".
+   */
+  public async hasSecurityRole(
+    ctx: AuthorizationContext,
+  ): Promise<AuthorizationDecision> {
+    const sessions = SessionContextService.getInstance();
+
+    // Writes go through `getActingUserIdForWrite` so an unattributed write
+    // still emits the structured `mp.write.non_user` warning before this gate
+    // refuses it — the attempt stays visible in production logs. Reads use the
+    // pure lookup; a refused read is logged by `requireSecurityRole` instead.
+    const userId =
+      ctx.operation === "read"
+        ? await sessions.getCurrentUserId()
+        : await sessions.getActingUserIdForWrite({
+            table: ctx.table,
+            operation: ctx.operation,
+          });
 
     if (userId === null) {
-      this.logDenied({ ...ctx, userId: null, reason: "no_mp_user" });
-      throw new UnauthorizedError(
-        `Not authorized: no Ministry Platform user is attached to this session (${ctx.operation} on ${ctx.table})`,
-      );
+      return { permitted: false, userId: null, reason: "no_mp_user" };
     }
 
     const roles = await this.getSecurityRoles(userId);
@@ -155,33 +231,72 @@ export class AuthorizationService {
         : roles.some((r) => required.includes(normalizeRoleName(r)));
 
     if (!permitted) {
-      this.logDenied({
-        ...ctx,
+      return {
+        permitted: false,
         userId,
         reason: roles.length === 0 ? "no_security_role" : "role_not_permitted",
-      });
-      throw new UnauthorizedError(
-        `Not authorized: an MP security role is required to ${ctx.operation} records in ${ctx.table}`,
-      );
+      };
     }
 
-    return userId;
+    return { permitted: true, userId, reason: null };
   }
 
   /**
-   * Emits a structured denial so refused writes are greppable in production
-   * logs. Same shape convention as `mp.write.non_user`.
+   * Gates an MP read or write on security-role membership and returns the
+   * acting user's MP `User_ID` so callers can use it for attribution.
+   *
+   * @throws UnauthorizedError when no MP user is attached to the session, or
+   *         when the user holds no permitted security role
+   */
+  public async requireSecurityRole(ctx: AuthorizationContext): Promise<number> {
+    const decision = await this.hasSecurityRole(ctx);
+
+    if (!decision.permitted) {
+      this.logDenied({
+        ...ctx,
+        userId: decision.userId,
+        reason: decision.reason ?? "no_security_role",
+      });
+      throw new UnauthorizedError(
+        decision.reason === "no_mp_user"
+          ? `Not authorized: no Ministry Platform user is attached to this session (${ctx.operation} on ${ctx.table})`
+          : `Not authorized: an MP security role is required to ${ctx.operation} records in ${ctx.table}`,
+      );
+    }
+
+    // `permitted` is only ever true with a resolved userId.
+    return decision.userId as number;
+  }
+
+  /**
+   * Write-only alias of {@link requireSecurityRole}, kept so existing write
+   * call sites read as what they are and so the narrower operation union
+   * catches a `read` passed by mistake at a write boundary.
+   */
+  public async requireSecurityRoleForWrite(ctx: {
+    table: string;
+    operation: "create" | "update" | "delete";
+  }): Promise<number> {
+    return this.requireSecurityRole(ctx);
+  }
+
+  /**
+   * Emits a structured denial so refused operations are greppable in
+   * production logs. Same shape convention as `mp.write.non_user`; reads get a
+   * parallel `mp.read.unauthorized` event so the two can be alerted on
+   * separately.
    */
   private logDenied(ctx: {
     table: string;
-    operation: string;
+    operation: MpOperation;
     userId: number | null;
-    reason: string;
+    reason: DenialReason;
   }): void {
+    const isRead = ctx.operation === "read";
     console.warn(
       JSON.stringify({
-        event: "mp.write.unauthorized",
-        message: "MP write refused — acting user lacks a permitted security role",
+        event: isRead ? "mp.read.unauthorized" : "mp.write.unauthorized",
+        message: `MP ${isRead ? "read" : "write"} refused — acting user lacks a permitted security role`,
         table: ctx.table,
         operation: ctx.operation,
         userId: ctx.userId,

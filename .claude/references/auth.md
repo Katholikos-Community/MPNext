@@ -46,10 +46,13 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 | `src/app/auth-error/page.tsx` | Landing page for a failed OAuth callback (`onAPIError.errorURL`) — outside the (web) route group, public in `src/proxy.ts` |
 | `src/contexts/user-context.tsx` | `UserProvider` — loads MP user profile client-side |
 | `src/contexts/session-context.tsx` | `useAppSession()` — thin wrapper around `authClient.useSession()` |
-| `src/components/layout/auth-wrapper.tsx` | Server guard for the (web) group — redirects to `/signin` (no session) or `/session-error` (session without `userGuid`) |
+| `src/components/layout/auth-wrapper.tsx` | Server guard for the (web) group — redirects to `/signin` (no session) or `/session-error` (session without `userGuid`). Authentication only; it does **not** check roles |
 | `src/app/session-error/page.tsx` | Recovery page for broken sessions — provides a sign-out even when the header/menu can't render (outside the (web) group, so not self-guarded) |
 | `src/components/user-menu/actions.ts` | `handleSignOut()` — OIDC logout flow |
-| `src/app/signin/page.tsx` | Sign-in page — auto-redirects to OAuth |
+| `src/app/signin/page.tsx` | Sign-in page — auto-redirects to OAuth; sanitizes `callbackUrl` to a same-origin relative path (see [Authorization](#authorization-distinct-from-authentication)) |
+| `src/services/authorizationService.ts` | The **authorization** gate — MP security-role check for reads and writes |
+| `src/app/(web)/contactlookup/layout.tsx` | Page-layer gate over `/contactlookup/**` — redirects a role-less user to `/no-access` |
+| `src/app/(web)/no-access/page.tsx` | "You need a security role" page. **Inside** the (web) group, so the header and sign-out still render |
 
 ## Auth Configuration (`src/lib/auth.ts`)
 
@@ -404,6 +407,24 @@ Uses `getSessionCookie()` from `better-auth/cookies` for fast cookie-only checks
 
 Everything else requires a valid session cookie. Missing cookie → redirect to `/signin`.
 
+### Authentication is not authorization
+
+`src/proxy.ts` and `AuthWrapper` answer only "is there a session?". **Any** Ministry
+Platform user can obtain one — MP's OIDC endpoint authenticates every `dp_Users`
+record, and this app reads MP with its own client-credentials service account
+(`dataplatform/scopes/all`), so MP's per-user record security never filters what
+this app returns. Route protection therefore gets a user as far as the app shell
+and no further:
+
+| Route | Needs a session | Needs an MP security role |
+|---|---|---|
+| `/signin`, `/auth-error` | No | No |
+| `/`, `/home`, `/no-access`, `/session-error` | Yes | No |
+| `/contactlookup`, `/contactlookup/[guid]` | Yes | **Yes** — `src/app/(web)/contactlookup/layout.tsx` redirects to `/no-access` |
+
+See [Authorization](#authorization-distinct-from-authentication) for the gate
+behind the last row.
+
 ## Broken-Session Recovery
 
 A session can authenticate successfully yet lack a `userGuid` (e.g. the
@@ -438,6 +459,40 @@ if (!session) {
 
 ### Server Actions
 
+Any action that **reads or writes Ministry Platform data** calls the authorization
+gate, not a bare session check. The gate implies an authenticated session (it fails
+closed when no MP user resolves), so it replaces the session check rather than
+following it — and it returns the acting `User_ID`, so a write never has to look one
+up again:
+
+```typescript
+"use server";
+import { AuthorizationService } from "@/services/authorizationService";
+
+// A read.
+export async function getThings() {
+  await AuthorizationService.getInstance().requireSecurityRole({
+    table: "Contacts",
+    operation: "read",
+  });
+  // ...
+}
+
+// A write — take $userId from the gate's return value.
+export async function updateThing() {
+  const userId = await AuthorizationService.getInstance().requireSecurityRole({
+    table: "Contact_Log",
+    operation: "update",
+  });
+  // ... pass { $userId: userId } to the MP write
+}
+```
+
+A bare session check is correct only for an action that touches **no per-person MP
+data** — today that is `getCurrentUserProfile` (a user's own profile; any MP user may
+sign in and must be able to load it) and `getMpTimezone` (one domain-wide config
+string):
+
 ```typescript
 "use server";
 import { auth } from "@/lib/auth";
@@ -453,17 +508,6 @@ export async function myAction() {
   const userGuid = (session.user as Record<string, unknown>).userGuid as string;
   // ... use userGuid to query dp_Users
 }
-```
-
-For an action that **writes** to MP, the session check above is only the first gate. Add
-the authorization gate and take the acting `User_ID` from its return value rather than
-looking it up again — see [Authorization](#authorization-distinct-from-authentication):
-
-```typescript
-const userId = await AuthorizationService.getInstance().requireSecurityRoleForWrite({
-  table: "Contact_Log",
-  operation: "update",
-});
 ```
 
 ### Client Components
@@ -498,16 +542,29 @@ function MyComponent() {
 **Authentication** answers "is there a valid session?" — `auth.api.getSession()`.
 **Authorization** answers "may this session do this?" — `AuthorizationService`
 (`src/services/authorizationService.ts`). They are separate gates; a valid session is
-necessary but not sufficient for a write.
+necessary but **not** sufficient for a read or a write.
 
-### Decided policy — contact-log writes (2026-08-21)
+### Decided policy (writes 2026-08-21; reads 2026-09-12)
 
-> **Any authenticated user who holds a Ministry Platform security role may create, edit,
-> and delete any contact log — including a log another user created.**
+> **Any Ministry Platform user may sign in.** A user with no security role gets a
+> session, the app shell (header, avatar, user menu, sign-out) and the home page.
+>
+> **The contact-lookup and contact-log features require an MP security role** — for
+> reads as well as writes. Any user who holds one may read, create, edit, and delete
+> any contact log, including one another user created.
 
-This was chosen deliberately, not left implicit. Prior to this decision the contact-log
-actions authenticated but never authorized, so *any* authenticated session could delete
-*any* contact log in the domain by ID.
+Sign-in itself is deliberately **not** role-gated. There is no role check in
+`getUserInfo` / `mapProfileToUser`, in `customSession` / `enrichSessionUser`, or in
+`AuthWrapper`; a role-less user must be able to reach a page that explains the problem
+and offers a sign-out, not be bounced off the login screen.
+
+**Why reads need a gate at all (F1).** Until 2026-09-12 the contact search, contact
+details, contact logs and the page guard checked only that a session existed. That
+proved nothing: MP's OIDC endpoint authenticates **any** `dp_Users` record, and this
+app fetches all MP data with its own client-credentials service account
+(`dataplatform/scopes/all`), so MP's per-user record security never applies to what
+the app returns. A session was therefore not evidence that the caller may see pastoral
+records; only this gate is.
 
 **Why role membership and not ownership:**
 
@@ -517,52 +574,129 @@ actions authenticated but never authorized, so *any* authenticated session could
 - Ownership (`Made_By`) is deliberately **not** a factor. Contact logs are shared
   pastoral records; staff need to correct and remove each other's entries. Gating on
   ownership would mean a supervisor could not fix a bad log through this app.
-- Authentication alone is *not* sufficient. A session for an MP user with no security
-  role cannot write, and neither can a session whose MP `User_ID` never resolved — the
-  gate fails closed.
+- The gate fails closed: a session whose MP `User_ID` never resolved is refused, and so
+  is one whose role list cannot be established.
 
-**Reads** (`getContactLogTypes`, `getContactLogsByContactId`, `getContactLogById`) require
-authentication only. Every authenticated user of this app is MP staff who can already see
-this data in MP itself, so the gate's purpose is write safety, not read confidentiality.
+### The four layers
+
+Three of these are enforcement; the fourth is presentation and is **not** a security
+control. Each enforcement layer re-checks, because each is independently reachable — a
+server action is a callable POST endpoint whether or not the page that calls it was
+ever rendered.
+
+| Layer | Where | What it does |
+|---|---|---|
+| **Page (server)** | `src/app/(web)/contactlookup/layout.tsx` | `hasSecurityRole` → `redirect("/no-access")`. Covers `[guid]/page.tsx` too: React renders the layout first and only renders `children` once it returns, so a redirect means the page component — and its server-action calls — never run |
+| **Server action** | `contact-lookup/actions.ts`, `contact-lookup-details/actions.ts`, `contact-logs/actions.ts` | `requireSecurityRole` on every exported action, reads included |
+| **Service** | `ContactService`, `ContactLogService` | `requireSecurityRole` inside each read and write method, so a future caller that bypasses the actions still cannot reach MP data |
+| *UX only* | `layout/sidebar.tsx`, `home-demos/contact-lookup-demo-card.tsx` | Hide navigation a role-less user would only be refused at. Reads the server-computed `canAccessContactFeatures` flag (below) — never policy derived on the client from role names |
+
+`AuthWrapper` is unchanged and stays the **authentication** gate for the `(web)` group
+(plus the `/session-error` recovery path). It knows nothing about roles.
 
 ### Using the gate
 
 ```typescript
 import { AuthorizationService } from "@/services/authorizationService";
 
-// Throws UnauthorizedError when the caller may not write.
+// Throws UnauthorizedError when the caller may not do this.
 // Returns the acting user's MP User_ID, so no dp_Users round-trip is needed.
-const userId = await AuthorizationService.getInstance().requireSecurityRoleForWrite({
+const userId = await AuthorizationService.getInstance().requireSecurityRole({
   table: "Contact_Log",
-  operation: "create", // "create" | "update" | "delete"
+  operation: "read", // "read" | "create" | "update" | "delete"
 });
 ```
 
-The acting user comes from `SessionContextService`, which reads the `userId` that
-`customSession` already baked into the session (cached process-wide by `resolveMpUserId`).
-Server actions must **not** re-implement the `dp_Users` lookup inline — that costs an
-uncached MP round-trip on every write.
+| Member | Signature | Use |
+|---|---|---|
+| `requireSecurityRole` | `(ctx: { table: string; operation: "read" \| "create" \| "update" \| "delete" }) => Promise<number>` | The gate. Throws `UnauthorizedError`; returns the acting MP `User_ID` |
+| `requireSecurityRoleForWrite` | same, `operation` narrowed to the three write verbs | Thin alias kept for write call sites (and so a `read` passed at a write boundary is a type error) |
+| `hasSecurityRole` | `(ctx) => Promise<{ permitted, userId, reason }>` | Non-throwing form the throwing gate is built on. Use for redirects and UI affordances — **never** as the enforcement point |
+| `getSecurityRoles` | `(userId: number) => Promise<string[]>` | Role names from `dp_User_Roles`, memoized per request |
 
-Denials are logged as a structured `mp.write.unauthorized` event (with `table`,
-`operation`, `userId`, and a `reason` of `no_mp_user` / `no_security_role` /
-`role_not_permitted`) so refused writes are greppable in production logs. An unattributed
-write still emits `mp.write.non_user` from `SessionContextService` before the gate rejects
-it, so the attempt remains visible.
+`hasSecurityRole` reports a *denial* as `permitted: false`, but still **throws** on
+infrastructure failure (MP unreachable, an unusable acting `User_ID`) so "MP is down"
+can never be mistaken for "this user is not allowed".
 
-**No caching.** Roles are re-read from MP on every gated write — one extra read per write.
-Writes are rare (a staff member saving a form) and a cached authorization decision means a
-revoked role keeps working. That trade is not worth making against a shared production
-database.
+The acting user comes from `SessionContextService`: `getCurrentUserId()` for reads,
+`getActingUserIdForWrite()` for writes, so an unattributed write still emits the
+structured `mp.write.non_user` warning before the gate refuses it. Server actions must
+**not** re-implement the `dp_Users` lookup inline.
+
+Denials are logged as a structured `mp.write.unauthorized` (writes) or
+`mp.read.unauthorized` (reads) event — same shape, with `table`, `operation`, `userId`,
+and a `reason` of `no_mp_user` / `no_security_role` / `role_not_permitted` — so refused
+operations are greppable in production logs. `hasSecurityRole` logs nothing: it runs on
+every profile load, and the UI asking "may they?" is not an incident.
+
+### Caching: per request, never across requests
+
+The gate now runs at up to three layers per request, so the `dp_User_Roles` read is
+memoized **per request** with React's `cache()` from `"react"`, keyed by `User_ID`. One
+request costs at most one role read no matter how many layers call the gate.
+
+There is still **no cross-request cache** — no module-level map, no TTL. Roles are
+re-read on the next request, so a revoked role stops working immediately. A cached
+authorization decision against a shared production database is not a trade worth
+making, and the per-request memo does not make it: a memo cannot outlive the request
+that created it.
+
+> ℹ️ **`cache()` outside a React request scope is a passthrough.** React calls straight
+> through when no cache dispatcher is installed, which is the case under Vitest and in
+> any plain Node caller. Tests therefore observe the *uncached* behaviour — which is
+> exactly the behaviour that must hold in both environments — so the suite asserts "the
+> decision is not carried across calls" and never asserts a hit count that only holds
+> inside a request.
 
 ### Tightening the gate
 
-Set `MP_WRITE_SECURITY_ROLES` to a comma-separated list of MP role names to require one of
-those specific roles instead of "any role". Comparison is case- and whitespace-insensitive.
-Unset or blank means any security role is sufficient (the default policy above).
+Set `MP_SECURITY_ROLES` to a comma-separated list of MP role names to require one of
+those specific roles instead of "any role". Comparison is case- and
+whitespace-insensitive. Unset or blank means any security role is sufficient (the
+default policy above). It applies to reads and writes alike.
 
 ```
-MP_WRITE_SECURITY_ROLES="Administrators,Pastoral Staff"
+MP_SECURITY_ROLES="Administrators,Pastoral Staff"
 ```
+
+> ⚠️ **`MP_WRITE_SECURITY_ROLES` is deprecated.** It predates the read gate and named
+> only writes. It is still read as a fallback when `MP_SECURITY_ROLES` is unset or
+> blank — so an existing deployment is not silently widened to "any role" by this
+> change — but it now governs reads too, and `MP_SECURITY_ROLES` wins where both are
+> set. Migrate one variable at a time; new deployments should set only
+> `MP_SECURITY_ROLES`.
+
+### `/no-access`
+
+`src/app/(web)/no-access/page.tsx` is where the layout sends a role-less user. It is
+**inside** the `(web)` group on purpose: the session is perfectly valid, so the user
+keeps the header, the avatar and — the part that matters — sign-out. (Contrast
+`/session-error`, which lives *outside* the group precisely because the shell cannot
+render there.) The page is static, with no auto-redirect and no retry: the fix is an
+administrator granting a role in MP, which cannot happen while the page refreshes
+itself. Granting the role takes effect on the user's next request, with no need to sign
+out and back in — there is no cached decision to expire.
+
+### Open redirect on `/signin` (F3, closed 2026-09-12)
+
+`callbackUrl` comes off the query string and was assigned straight to
+`window.location.href` for a visitor who already had a session, so
+`/signin?callbackUrl=https://evil.example` bounced the user off-site from a URL that
+looks like this app's own login page. `sanitizeCallbackUrl` in
+`src/app/signin/page.tsx` now reduces it to a same-origin relative path — it must start
+with `/` and must not start with `//` or `/\` (browsers normalize the latter to the
+former) — and the sanitized value feeds **both** sinks: the `location.href` assignment
+and the `callbackURL` handed to `signIn.social` (which better-auth also validates
+server-side; defence in depth).
+
+### Closed findings
+
+| Finding | Closed | Fix |
+|---|---|---|
+| **F1** (High) — reads gated on a session only, at one layer | 2026-09-12 | Role gate at the page, action **and** service layers; `mp.read.unauthorized` denial log |
+| **F3** (Medium) — open redirect via `callbackUrl` on `/signin` | 2026-09-12 | `sanitizeCallbackUrl`, applied to both redirect sinks |
+| **F10** (Low) — `ContactService.updateContact` wrote with no authorization | 2026-09-12 | Calls `requireSecurityRole({ table: "Contacts", operation: "update" })` and uses its `User_ID` for `$userId` |
+| **F11** (Low) — `getMpTimezone` had no check at all | 2026-09-12 | Authenticated-session check (its only consumer is the role-gated contact page) |
 
 ## Environment Variables
 
@@ -573,7 +707,8 @@ MP_WRITE_SECURITY_ROLES="Administrators,Pastoral Staff"
 | `BETTER_AUTH_SECRET` | Yes* | Session signing secret. Fallback: `NEXTAUTH_SECRET` |
 | `OIDC_CLIENT_ID` | Yes | OAuth client ID registered in MP |
 | `OIDC_CLIENT_SECRET` | Yes | OAuth client secret |
-| `MP_WRITE_SECURITY_ROLES` | No | Comma-separated MP role names permitted to perform gated writes. Unset = any security role. See [Authorization](#authorization-distinct-from-authentication). |
+| `MP_SECURITY_ROLES` | No | Comma-separated MP role names permitted to use the gated contact features (reads **and** writes). Unset or blank = any security role. See [Authorization](#authorization-distinct-from-authentication). |
+| `MP_WRITE_SECURITY_ROLES` | No | **Deprecated** — the write-only predecessor of `MP_SECURITY_ROLES`, read only when that is unset or blank, and now governing reads too. |
 
 *Fallback variables allow gradual migration from NextAuth.
 

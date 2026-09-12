@@ -89,6 +89,55 @@ vi.mock('@/services/contactService', () => ({
 }));
 ```
 
+### Mocking the authorization gate (server actions AND services)
+
+Every contact action and every `ContactService` / `ContactLogService` method
+calls `AuthorizationService` — for reads as well as writes (see
+`.claude/references/auth.md` § Authorization). Mock the singleton the same way
+as any other, and re-declare `UnauthorizedError` inside the factory so tests can
+assert on the type:
+
+```typescript
+const { mockRequireSecurityRole } = vi.hoisted(() => ({
+  mockRequireSecurityRole: vi.fn(),
+}));
+
+vi.mock('@/services/authorizationService', () => {
+  class UnauthorizedError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'UnauthorizedError';
+    }
+  }
+  return {
+    UnauthorizedError,
+    AuthorizationService: {
+      getInstance: () => ({ requireSecurityRole: mockRequireSecurityRole }),
+    },
+  };
+});
+
+beforeEach(() => {
+  // Default to an authorized role-holder; individual tests override.
+  mockRequireSecurityRole.mockResolvedValue(99);
+});
+```
+
+The gate subsumes authentication (it fails closed when no MP user resolves), so
+files that mock it generally do **not** need `@/lib/auth` or `next/headers` at
+all — `contact-logs/actions.test.ts` and `contact-lookup*/actions.test.ts`
+dropped both. Use `hasSecurityRole` (returning
+`{ permitted, userId, reason }`) instead where the subject calls the
+non-throwing form: `shared-actions/user.test.ts` and the `/contactlookup`
+layout test.
+
+> ⚠️ **`cache()` from `"react"` is a passthrough under Vitest.** The gate
+> memoizes its `dp_User_Roles` read per request with React's `cache()`. React
+> calls straight through when no cache dispatcher is installed, which is the
+> case in every test here. So assert only what holds in *both* environments —
+> "the decision is not carried across calls" — and never a hit count that
+> depends on the memo being live.
+
 ### Mocking Auth + Headers (server actions)
 
 Most server actions require `auth.api.getSession()` and `headers()`:
@@ -465,17 +514,17 @@ Two mechanics worth knowing before editing these:
 Keep branch gates loose where the denominator is small - `src/app/**` has only 10
 branches in total, so a single uncovered one costs 10 points.
 
-### Current coverage (786 tests, 50 files)
+### Current coverage (897 tests, 54 files)
 
 Whole app, as `npm run test:coverage` prints it - every `src/**/*.{ts,tsx}`
 excluding generated models, codegen scripts, `src/components/ui/`, and test files:
 
 | Metric | Value |
 |---|---|
-| Statements | **99.45%** (1089/1095) |
-| Branches | **97.02%** (522/538) |
-| Functions | **98.86%** (262/265) |
-| Lines | **99.71%** (1062/1065) |
+| Statements | **99.47%** (1141/1147) |
+| Branches | **96.65%** (549/568) |
+| Functions | **98.92%** (275/278) |
+| Lines | **99.73%** (1110/1113) |
 
 This is now a single honest number. Earlier revisions of this doc quoted two
 figures - a high non-UI one and a low whole-app one - because feature components
@@ -531,57 +580,61 @@ Recorded as tests pinning current behavior, not fixed - each needs a source chan
 
 | Test File | Tests | What It Covers |
 |-----------|-------|----------------|
-| `components/contact-logs/actions.test.ts` | 67 | Contact log CRUD actions, auth/argument guards, security-role write gate, ownership policy, numeric-ID injection rejection |
+| `components/contact-logs/actions.test.ts` | 69 | Contact log CRUD actions, security-role gate on reads AND writes, argument guards, ownership policy, numeric-ID injection rejection |
+| `services/contactLogService.test.ts` | 64 | Contact log CRUD, service-layer read/write gate, date conversion, Zod validation, filter-injection regression guard |
 | `lib/providers/ministry-platform/helper.test.ts` | 54 | MPHelper CRUD, validation, procedures, files |
-| `services/contactLogService.test.ts` | 54 | Contact log CRUD, date conversion, Zod validation, filter-injection regression guard |
 | `lib/providers/ministry-platform/utils/filter-sanitize.test.ts` | 49 | Quote doubling, LIKE escaping, GUID rejection, numeric-ID validation |
-| `auth.test.ts` | 46 | `enrichSessionUser`, cached User_ID resolution, OAuth config guards |
+| `auth.test.ts` | 47 | `enrichSessionUser`, cached User_ID resolution, OAuth config guards |
+| `services/authorizationService.test.ts` | 40 | MP security-role gate for reads and writes, `hasSecurityRole`, `MP_SECURITY_ROLES` + deprecated `MP_WRITE_SECURITY_ROLES` fallback, `mp.read.unauthorized` / `mp.write.unauthorized` denials, no cross-request caching |
 | `components/contact-logs/contact-logs.test.tsx` | 36 | Delete-confirmation gate, form validation, error surfacing (MP write path), edit/cancel paths, in-flight double-write guard, log-type colour arms, MP wall-clock date rendering |
 | `lib/providers/ministry-platform/services/file.service.test.ts` | 35 | All 8 file endpoints, multipart bodies, unauthenticated blob fetch |
 | `lib/providers/ministry-platform/utils/http-client.test.ts` | 28 | HTTP verbs, URL building, form data, error handling |
+| `components/contact-lookup-details/actions.test.ts` | 26 | Contact details + log type mapping, security-role read gate, numeric-ID injection rejection |
 | `lib/providers/ministry-platform/provider.test.ts` | 24 | Provider delegation to all six sub-services |
-| `components/contact-lookup-details/actions.test.ts` | 22 | Contact details + log type mapping, numeric-ID injection rejection |
+| `app/signin/page.test.tsx` | 22 | `signIn.social({ provider: "ministry-platform" })`, `callbackUrl` fallbacks and open-redirect sanitizing (F3), already-signed-in bounce, `isRedirecting` latch |
 | `lib/providers/ministry-platform/services/table.service.test.ts` | 21 | TableService CRUD |
-| `services/authorizationService.test.ts` | 21 | MP security-role write gate, `MP_WRITE_SECURITY_ROLES`, `mp.write.unauthorized` denials |
-| `components/contact-lookup-details/contact-lookup-details.test.tsx` | 18 | Suspense pending/resolved states, MP photo URL, nickname + initials fallbacks, `N/A` placeholders, props handed to ContactLogs |
 | `services/domainTimezoneService.test.ts` | 18 | Windows-to-IANA mapping, DST, round-tripping, cache |
+| `components/contact-lookup-details/contact-lookup-details.test.tsx` | 18 | Suspense pending/resolved states, MP photo URL, nickname + initials fallbacks, `N/A` placeholders, props handed to ContactLogs |
+| `services/contactService.test.ts` | 17 | Contact search, getByGuid, updateContact, service-layer read/write gate (F10) |
 | `components/layout/header.test.tsx` | 17 | App-title env fallback, profile-loading state, avatar vs icon fallback, the tooltip chain (incl. falling back to `mpEmail`, never the synthetic session email), sidebar open/close ownership |
 | `components/contact-lookup/contact-lookup-search.test.tsx` | 16 | Empty-query rejection, in-flight lock, Enter vs button submit, action rejection surfaced |
 | `lib/providers/ministry-platform/services/procedure.service.test.ts` | 16 | Procedure listing and execution, name encoding |
 | `components/contact-lookup/contact-lookup-results.test.tsx` | 15 | Empty state, row rendering with missing optional fields, row navigation |
 | `lib/providers/ministry-platform/client.test.ts` | 15 | OAuth token management |
+| `app/api/auth/[...all]/route.test.ts` | 15 | Route allowlist (deny-by-default), `toNextJsHandler` wiring, exported methods |
 | `lib/providers/ministry-platform/services/communication.service.test.ts` | 13 | Email/SMS JSON vs multipart paths |
 | `app/(web)/layout.test.tsx` | 12 | `AuthWrapper` is an ancestor of the page and sits outside `Providers`; Header-in-Suspense; both metadata title branches |
+| `components/shared-actions/user.test.ts` | 12 | `getCurrentUserProfile` delegation, server-computed `canAccessContactFeatures`, role-less users keep their profile |
 | `components/user-menu/user-menu.test.tsx` | 12 | Radix trigger opens on pointerDown, sign-out fires once, `onClose` ordering, degenerate-profile sign-out |
-| `services/contactService.test.ts` | 12 | Contact search, getByGuid, updateContact |
-| `app/(web)/contactlookup/[guid]/page.test.tsx` | 10 | Next.js 16 async `params` await, promises passed down unresolved for streaming, `Contact_ID` guard, rejection propagation |
-| `components/contact-lookup/contact-lookup.test.tsx` | 10 | Search-to-results state wiring, error and empty propagation |
-| `components/layout/dynamic-breadcrumb.test.tsx` | 10 | Segment derivation incl. GUIDs, doubled/trailing slashes, all three `customSegments` shapes |
+| `components/layout/sidebar.test.tsx` | 11 | Nav label+href pairs, `onClose` from X and from a nav link, panel stays mounted when closed, Contact Lookup hidden/shown by `canAccessContactFeatures` (fails closed) |
 | `services/sessionContextService.test.ts` | 10 | Acting-user resolution, `mp.write.non_user` warning |
-| `components/contact-lookup/actions.test.ts` | 8 | Search contacts action |
+| `components/layout/dynamic-breadcrumb.test.tsx` | 10 | Segment derivation incl. GUIDs, doubled/trailing slashes, all three `customSegments` shapes |
+| `components/contact-lookup/actions.test.ts` | 10 | Search contacts action, security-role read gate, denial not flattened into a generic error |
+| `components/contact-lookup/contact-lookup.test.tsx` | 10 | Search-to-results state wiring, error and empty propagation |
+| `app/(web)/contactlookup/[guid]/page.test.tsx` | 10 | Next.js 16 async `params` await, promises passed down unresolved for streaming, `Contact_ID` guard, rejection propagation |
+| `proxy.test.ts` | 9 | Route protection (public paths, session, errors) |
 | `contexts/user-context.test.tsx` | 8 | UserProvider + useUser lifecycle |
+| `services/userService.test.ts` | 8 | User profile lookup, GUID + User_ID validation |
+| `app/auth-error/page.test.tsx` | 8 | OAuth-failure landing page, error-code rendering |
+| `app/(web)/contactlookup/layout.test.tsx` | 8 | Page-layer role gate: renders children for a role-holder, `redirect("/no-access")` for every denial reason, MP failure surfaces instead of redirecting |
 | `lib/providers/ministry-platform/services/domain.service.test.ts` | 8 | Domain info and global filters |
 | `lib/providers/ministry-platform/services/metadata.service.test.ts` | 8 | Metadata refresh, table listing |
-| `proxy.test.ts` | 8 | Route protection (public paths, session, errors) |
-| `services/userService.test.ts` | 8 | User profile lookup, GUID + User_ID validation |
-| `app/signin/page.test.tsx` | 7 | `signIn.social({ provider: "ministry-platform" })`, `callbackUrl` fallbacks, already-signed-in bounce, `isRedirecting` latch |
-| `components/shared-actions/user.test.ts` | 7 | `getCurrentUserProfile` delegation |
 | `lib/utils.test.ts` | 7 | `cn()` Tailwind class merging |
-| `app/(web)/page.test.tsx` | 6 | `/contactlookup` href; page stays synchronous and prop-less (no MP fetch) |
+| `app/(web)/page.test.tsx` | 7 | Demo tile mounted in Suspense and omitted without access; page stays synchronous and prop-less (no MP fetch) |
+| `components/home-demos/contact-lookup-demo-card.test.tsx` | 6 | Dashboard tile renders only with `canAccessContactFeatures === true`, `/contactlookup` href, fails closed on a null/flagless profile |
 | `app/providers.test.tsx` | 5 | Children nested inside `UserProvider`, not beside it |
-| `components/layout/sidebar.test.tsx` | 5 | Nav label+href pairs, `onClose` from X and from a nav link, panel stays mounted when closed |
+| `components/shared-actions/domain.test.ts` | 5 | `getMpTimezone` delegation and its authenticated-session check (F11) |
 | `components/user-menu/actions.test.ts` | 5 | Sign-out + OAuth end session redirect |
+| `app/(web)/no-access/page.test.tsx` | 5 | Explains the missing security role, names the administrator, no link or auto-redirect that would loop back into the gate |
 | `lib/providers/ministry-platform/auth/client-credentials.test.ts` | 5 | Client-credentials token grant |
-| `app/api/auth/[...all]/route.test.ts` | 4 | `toNextJsHandler` called once with the shared `auth`; exactly `GET` + `POST` exported |
 | `app/layout.test.tsx` | 4 | `<html lang>`/`<body>` pair, children pass through by identity (no wrapping) |
-| `app/session-error/page.test.tsx` | 4 | Sign-out is a real submit inside `<form action>` and actually invokes the action |
-| `components/layout/auth-wrapper.test.tsx` | 4 | Auth gating wrapper |
 | `lib/auth-client.test.ts` | 4 | Client plugin wiring (`customSessionClient`, `signIn.social`) |
+| `app/session-error/page.test.tsx` | 4 | Sign-out is a real submit inside `<form action>` and actually invokes the action |
+| `components/layout/auth-wrapper.test.tsx` | 4 | Auth gating wrapper (authentication only — no role check) |
 | `app/(web)/contactlookup/page.test.tsx` | 3 | Mounts `<ContactLookup>` with zero props, keeping the client shell a leaf |
-| `components/shared-actions/domain.test.ts` | 3 | `getMpTimezone` delegation |
-| `app/(web)/home/page.test.tsx` | 2 | Unconditional redirect to `/`, never looping back to `/home` |
 | `contexts/session-context.test.tsx` | 2 | `useAppSession` wrapper |
-| **Total** | **786** | |
+| `app/(web)/home/page.test.tsx` | 2 | Unconditional redirect to `/`, never looping back to `/home` |
+| **Total** | **897** | |
 
 ## Ministry Platform Safety in Tests
 

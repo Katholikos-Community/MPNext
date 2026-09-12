@@ -4,15 +4,29 @@ import { ContactLookupDetails, ContactLogDisplay } from '@/lib/dto';
 import { ContactService } from '@/services/contactService';
 import { ContactLogService } from '@/services/contactLogService';
 import { sanitizeNumericId } from '@/lib/providers/ministry-platform/utils/filter-sanitize';
-import { auth } from '@/lib/auth';
-import { headers } from 'next/headers';
+import { AuthorizationService } from '@/services/authorizationService';
+
+/**
+ * Contact detail server actions.
+ *
+ * Both actions are READS, and both require an MP security role — not merely an
+ * authenticated session (F1, 2026-09-12). MP's OIDC endpoint authenticates any
+ * `dp_Users` record and this app reads MP with its own client-credentials
+ * service account, so MP's per-user record security never applies to what these
+ * return. `AuthorizationService.requireSecurityRole` implies an authenticated
+ * session, so it replaces the bare session check outright. See
+ * `.claude/references/auth.md` § Authorization.
+ */
+async function requireContactReadAccess(table: string): Promise<void> {
+  await AuthorizationService.getInstance().requireSecurityRole({
+    table,
+    operation: 'read',
+  });
+}
 
 export async function getContactDetails(guid: string): Promise<ContactLookupDetails> {
   try {
-    const session = await auth.api.getSession({ headers: await headers() });
-    if (!session?.user?.id) {
-      throw new Error('Authentication required');
-    }
+    await requireContactReadAccess('Contacts');
 
     if (!guid || guid.trim().length === 0) {
       throw new Error('GUID is required');
@@ -34,10 +48,7 @@ export async function getContactDetails(guid: string): Promise<ContactLookupDeta
 
 export async function getContactLogsByContactId(contactId: number): Promise<ContactLogDisplay[]> {
   try {
-    const session = await auth.api.getSession({ headers: await headers() });
-    if (!session?.user?.id) {
-      throw new Error('Authentication required');
-    }
+    await requireContactReadAccess('Contact_Log');
 
     const id = sanitizeNumericId(contactId, 'Contact ID');
 

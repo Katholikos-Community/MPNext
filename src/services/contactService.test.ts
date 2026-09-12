@@ -3,11 +3,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const {
   mockGetTableRecords,
   mockUpdateTableRecords,
-  mockGetActingUserIdForWrite,
+  mockRequireSecurityRole,
 } = vi.hoisted(() => ({
   mockGetTableRecords: vi.fn(),
   mockUpdateTableRecords: vi.fn(),
-  mockGetActingUserIdForWrite: vi.fn(),
+  mockRequireSecurityRole: vi.fn(),
 }));
 
 vi.mock('@/lib/providers/ministry-platform', () => {
@@ -19,20 +19,31 @@ vi.mock('@/lib/providers/ministry-platform', () => {
   };
 });
 
-vi.mock('@/services/sessionContextService', () => ({
-  SessionContextService: {
-    getInstance: () => ({
-      getActingUserIdForWrite: mockGetActingUserIdForWrite,
-    }),
-  },
-}));
+vi.mock('@/services/authorizationService', () => {
+  class UnauthorizedError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'UnauthorizedError';
+    }
+  }
+  return {
+    UnauthorizedError,
+    AuthorizationService: {
+      getInstance: () => ({
+        requireSecurityRole: mockRequireSecurityRole,
+      }),
+    },
+  };
+});
 
 import { ContactService } from '@/services/contactService';
+import { UnauthorizedError } from '@/services/authorizationService';
 
 describe('ContactService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockGetActingUserIdForWrite.mockResolvedValue(500);
+    // Default: an authorized role-holder with MP User_ID 500.
+    mockRequireSecurityRole.mockResolvedValue(500);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (ContactService as any).instance = undefined;
   });
@@ -134,6 +145,61 @@ describe('ContactService', () => {
     });
   });
 
+  /**
+   * F1 (2026-09-12). Reads used to be ungated at every layer, and MP data is
+   * fetched with this app's client-credentials service account, so MP's own
+   * per-user record security never applies. The service re-checks rather than
+   * trusting its callers: a future action, route handler or script that forgets
+   * the gate must still come up empty.
+   */
+  describe('read authorization', () => {
+    it('gates contactSearch on an MP security role before touching MP', async () => {
+      mockGetTableRecords.mockResolvedValueOnce([]);
+
+      const service = await ContactService.getInstance();
+      await service.contactSearch('John');
+
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+        table: 'Contacts',
+        operation: 'read',
+      });
+    });
+
+    it('does NOT search when the caller holds no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required'),
+      );
+
+      const service = await ContactService.getInstance();
+      await expect(service.contactSearch('John')).rejects.toThrow(UnauthorizedError);
+      expect(mockGetTableRecords).not.toHaveBeenCalled();
+    });
+
+    it('gates getContactByGuid on an MP security role before touching MP', async () => {
+      mockGetTableRecords.mockResolvedValueOnce([]);
+
+      const service = await ContactService.getInstance();
+      await service.getContactByGuid('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
+
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+        table: 'Contacts',
+        operation: 'read',
+      });
+    });
+
+    it('does NOT read a contact by GUID when the caller holds no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required'),
+      );
+
+      const service = await ContactService.getInstance();
+      await expect(
+        service.getContactByGuid('a1b2c3d4-e5f6-7890-abcd-ef1234567890'),
+      ).rejects.toThrow(UnauthorizedError);
+      expect(mockGetTableRecords).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updateContact', () => {
     it('should update contact with correct record and $userId from session', async () => {
       mockUpdateTableRecords.mockResolvedValueOnce([]);
@@ -146,7 +212,7 @@ describe('ContactService', () => {
         [{ Contact_ID: 42, Email_Address: 'new@example.com' }],
         { $userId: 500 },
       );
-      expect(mockGetActingUserIdForWrite).toHaveBeenCalledWith({
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
         table: 'Contacts',
         operation: 'update',
       });
@@ -168,17 +234,34 @@ describe('ContactService', () => {
       );
     });
 
-    it('omits $userId param when SessionContextService resolves to null (anonymous update)', async () => {
-      mockGetActingUserIdForWrite.mockResolvedValueOnce(null);
+    // F10 (2026-09-12). This method used to take its acting user straight from
+    // SessionContextService, which logs and proceeds when none resolves — so an
+    // unattributed, unauthorized write to Contacts went through and MP recorded
+    // it against the integration account. It must now refuse.
+    it('does NOT write when the caller holds no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required'),
+      );
+
+      const service = await ContactService.getInstance();
+      await expect(
+        service.updateContact(42, { Email_Address: 'anon@example.com' }),
+      ).rejects.toThrow(UnauthorizedError);
+
+      expect(mockUpdateTableRecords).not.toHaveBeenCalled();
+    });
+
+    it('stamps $userId with the User_ID the gate returned, not one it looked up', async () => {
+      mockRequireSecurityRole.mockResolvedValueOnce(4242);
       mockUpdateTableRecords.mockResolvedValueOnce([]);
 
       const service = await ContactService.getInstance();
-      await service.updateContact(42, { Email_Address: 'anon@example.com' });
+      await service.updateContact(42, { Email_Address: 'new@example.com' });
 
       expect(mockUpdateTableRecords).toHaveBeenCalledWith(
         'Contacts',
-        [{ Contact_ID: 42, Email_Address: 'anon@example.com' }],
-        undefined,
+        expect.anything(),
+        { $userId: 4242 },
       );
     });
 

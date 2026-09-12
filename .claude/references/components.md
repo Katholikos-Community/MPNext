@@ -17,6 +17,7 @@ src/components/
 ├── contact-logs/               # Contact log CRUD feature
 ├── contact-lookup/             # Contact search feature
 ├── contact-lookup-details/     # Contact details view
+├── home-demos/                 # Dashboard demo tiles (access-gated)
 └── user-menu/                  # User dropdown menu
 ```
 
@@ -39,6 +40,7 @@ src/components/
 | `contact-logs/` | Contact log CRUD with modal forms | Yes |
 | `contact-lookup/` | Contact search with results display | Yes |
 | `contact-lookup-details/` | Contact profile and logs view | Yes |
+| `home-demos/` | Dashboard demo tiles; renders nothing for a user without contact access | No |
 | `user-menu/` | User dropdown with sign-out | Yes |
 
 ### UI Components (shadcn/ui)
@@ -61,6 +63,26 @@ Actions are co-located with their feature components:
 | contact-lookup-details | `contact-lookup-details/actions.ts` | `getContactDetails`, `getContactLogsByContactId` |
 | user-menu | `user-menu/actions.ts` | `handleSignOut` |
 | **shared** | `shared-actions/user.ts` | `getCurrentUserProfile` |
+| **shared** | `shared-actions/domain.ts` | `getMpTimezone` |
+
+### Authorization (every action, reads included)
+
+Since 2026-09-12 (F1) **every** action in `contact-logs/`, `contact-lookup/` and
+`contact-lookup-details/` calls
+`AuthorizationService.getInstance().requireSecurityRole({ table, operation })`
+rather than a bare session check — reads as well as writes. The gate implies an
+authenticated session, so it replaces `auth.api.getSession()` in those files
+outright. `shared-actions/domain.ts` keeps a plain session check (one
+domain-wide config string, not per-person data) and `shared-actions/user.ts`
+keeps one too, because any MP user may sign in and must be able to load their
+own profile. Full rationale: `.claude/references/auth.md` § Authorization.
+
+Routes carrying the page-layer half of that gate:
+
+| Route file | Purpose |
+|---|---|
+| `src/app/(web)/contactlookup/layout.tsx` | Server gate over `/contactlookup` and `/contactlookup/[guid]`; `redirect("/no-access")` for a user with no MP security role |
+| `src/app/(web)/no-access/page.tsx` | Static explanation page, inside `(web)` so the header and sign-out still render |
 
 **Shared Actions Folder**: `src/components/shared-actions/` contains actions used across multiple features. See the README in that folder for guidelines on when to use shared vs co-located actions.
 
@@ -127,6 +149,11 @@ All components pass the following checks:
 - **Features**: Create/edit modals, delete confirmation, log type filtering
 - **Dependencies**: ContactLogService, React Hook Form, Zod validation
 
+### home-demos
+- **Purpose**: The dashboard's demo tiles
+- **Components**: `ContactLookupDemoCard`
+- **Features**: Reads `canAccessContactFeatures` off the MP profile via `useUser()` and renders `null` when it is not `true`. UX only — hiding a tile is not a security control; the layout, actions and services each enforce. Mounted inside a `<Suspense>` boundary by `src/app/(web)/page.tsx`, because `useUser()` suspends while the profile loads.
+
 ### contact-lookup
 - **Purpose**: Search contacts by name/email/phone
 - **Components**: `ContactLookup` (container), `ContactLookupSearch` (input), `ContactLookupResults` (display)
@@ -150,5 +177,6 @@ Components interact with these service classes:
 | ContactService | `@/services/contactService` | contact-lookup, contact-lookup-details |
 | ContactLogService | `@/services/contactLogService` | contact-logs |
 | UserService | `@/services/userService` | user-menu |
+| AuthorizationService | `@/services/authorizationService` | contact-logs, contact-lookup, contact-lookup-details, shared-actions/user |
 
 All services ultimately use `MPHelper` from `@/lib/providers/ministry-platform` for API calls.

@@ -1,28 +1,33 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const {
-  mockGetSession,
+  mockRequireSecurityRole,
   mockGetContactByGuid,
   mockGetContactLogsByContactId,
   mockGetContactLogTypes,
 } = vi.hoisted(() => ({
-  mockGetSession: vi.fn(),
+  mockRequireSecurityRole: vi.fn(),
   mockGetContactByGuid: vi.fn(),
   mockGetContactLogsByContactId: vi.fn(),
   mockGetContactLogTypes: vi.fn(),
 }));
 
-vi.mock('@/lib/auth', () => ({
-  auth: {
-    api: {
-      getSession: mockGetSession,
+vi.mock('@/services/authorizationService', () => {
+  class UnauthorizedError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'UnauthorizedError';
+    }
+  }
+  return {
+    UnauthorizedError,
+    AuthorizationService: {
+      getInstance: () => ({
+        requireSecurityRole: mockRequireSecurityRole,
+      }),
     },
-  },
-}));
-
-vi.mock('next/headers', () => ({
-  headers: vi.fn().mockResolvedValue(new Headers()),
-}));
+  };
+});
 
 vi.mock('@/services/contactService', () => ({
   ContactService: {
@@ -42,34 +47,71 @@ vi.mock('@/services/contactLogService', () => ({
 }));
 
 import { getContactDetails, getContactLogsByContactId } from './actions';
+import { UnauthorizedError } from '@/services/authorizationService';
 
-const mockAuthSession = {
-  user: { id: 'internal-id', userGuid: 'user-guid-123' },
-};
-
+/**
+ * Both actions here are reads, and as of F1 (2026-09-12) both require an MP
+ * security role rather than a bare session. The old `mockGetSession` harness is
+ * gone: the gate subsumes authentication, so there is nothing left for a
+ * session-only assertion to say.
+ */
 describe('contact-lookup-details actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: an authorized role-holder.
+    mockRequireSecurityRole.mockResolvedValue(99);
   });
 
   describe('getContactDetails', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
-      await expect(getContactDetails('some-guid')).rejects.toThrow('Authentication required');
+    it('requires an MP security role, not merely a session', async () => {
+      mockGetContactByGuid.mockResolvedValueOnce({ Contact_ID: 1 });
+
+      await getContactDetails('ab12cd34-ef56-7890-abcd-ef1234567890');
+
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+        table: 'Contacts',
+        operation: 'read',
+      });
+    });
+
+    it('reads nothing when the caller holds no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required')
+      );
+
+      await expect(getContactDetails('some-guid')).rejects.toThrow(UnauthorizedError);
+      expect(mockGetContactByGuid).not.toHaveBeenCalled();
+    });
+
+    it('rejects a session with no Ministry Platform user', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: no Ministry Platform user is attached to this session')
+      );
+
+      await expect(getContactDetails('some-guid')).rejects.toThrow(
+        /no Ministry Platform user is attached/
+      );
+      expect(mockGetContactByGuid).not.toHaveBeenCalled();
+    });
+
+    it('refuses before validating the GUID argument', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required')
+      );
+
+      // An unauthorized caller must not be able to probe argument validation.
+      await expect(getContactDetails('')).rejects.toThrow(UnauthorizedError);
     });
 
     it('should throw for empty GUID', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(getContactDetails('')).rejects.toThrow('GUID is required');
     });
 
     it('should throw for whitespace-only GUID', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(getContactDetails('   ')).rejects.toThrow('GUID is required');
     });
 
     it('should return contact details when found', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       const mockContact = {
         Contact_ID: 1,
         Contact_GUID: 'guid-123',
@@ -85,7 +127,6 @@ describe('contact-lookup-details actions', () => {
     });
 
     it('should throw when contact not found', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactByGuid.mockResolvedValueOnce(null);
 
       await expect(getContactDetails('nonexistent-guid')).rejects.toThrow('Contact not found');
@@ -93,18 +134,31 @@ describe('contact-lookup-details actions', () => {
   });
 
   describe('getContactLogsByContactId', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
-      await expect(getContactLogsByContactId(42)).rejects.toThrow('Authentication required');
+    it('gates the contact-log read on an MP security role', async () => {
+      mockGetContactLogsByContactId.mockResolvedValueOnce([]);
+
+      await getContactLogsByContactId(42);
+
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+        table: 'Contact_Log',
+        operation: 'read',
+      });
+    });
+
+    it('reads nothing when the caller holds no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required')
+      );
+
+      await expect(getContactLogsByContactId(42)).rejects.toThrow(UnauthorizedError);
+      expect(mockGetContactLogsByContactId).not.toHaveBeenCalled();
     });
 
     it('should throw for invalid contact ID', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(getContactLogsByContactId(0)).rejects.toThrow('Invalid Contact ID');
     });
 
     it('should return logs with type names mapped', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       const mockLogs = [
         { Contact_Log_ID: 1, Contact_ID: 42, Contact_Log_Type_ID: 1, Notes: 'Test' },
         { Contact_Log_ID: 2, Contact_ID: 42, Contact_Log_Type_ID: null, Notes: 'No type' },
@@ -124,7 +178,6 @@ describe('contact-lookup-details actions', () => {
     });
 
     it('should handle unknown type ID gracefully', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       const mockLogs = [
         { Contact_Log_ID: 1, Contact_ID: 42, Contact_Log_Type_ID: 999, Notes: 'Unknown type' },
       ];
@@ -146,7 +199,6 @@ describe('contact-lookup-details actions', () => {
   // and never counted it, which is exactly why the N+1 was invisible to the suite.
   describe('contact log type lookup is fetched once', () => {
     it('fetches the lookup table exactly once for many typed logs', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogsByContactId.mockResolvedValueOnce([
         { Contact_Log_ID: 1, Contact_ID: 42, Contact_Log_Type_ID: 1, Notes: 'a' },
         { Contact_Log_ID: 2, Contact_ID: 42, Contact_Log_Type_ID: 2, Notes: 'b' },
@@ -172,7 +224,6 @@ describe('contact-lookup-details actions', () => {
     });
 
     it('does not fetch the lookup table when no log has a type', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogsByContactId.mockResolvedValueOnce([
         { Contact_Log_ID: 1, Contact_ID: 42, Contact_Log_Type_ID: null, Notes: 'a' },
         { Contact_Log_ID: 2, Contact_ID: 42, Contact_Log_Type_ID: 0, Notes: 'b' },
@@ -185,7 +236,6 @@ describe('contact-lookup-details actions', () => {
     });
 
     it('does not fetch the lookup table when the contact has no logs', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogsByContactId.mockResolvedValueOnce([]);
 
       const result = await getContactLogsByContactId(42);
@@ -195,7 +245,6 @@ describe('contact-lookup-details actions', () => {
     });
 
     it('maps a type with an empty name to null rather than the empty string', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogsByContactId.mockResolvedValueOnce([
         { Contact_Log_ID: 1, Contact_ID: 42, Contact_Log_Type_ID: 1, Notes: 'a' },
       ]);
@@ -215,7 +264,6 @@ describe('contact-lookup-details actions', () => {
     // rejected promise carrying a plain object) must still surface a real Error,
     // otherwise the caller gets `undefined` for `error.message`.
     it('should wrap a non-Error rejection from getContactDetails', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactByGuid.mockRejectedValueOnce('mp connection reset');
 
       await expect(getContactDetails('ab12cd34-ef56-7890-abcd-ef1234567890')).rejects.toThrow(
@@ -224,7 +272,6 @@ describe('contact-lookup-details actions', () => {
     });
 
     it('should wrap a non-Error rejection from getContactLogsByContactId', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogsByContactId.mockRejectedValueOnce({ status: 500 });
 
       await expect(getContactLogsByContactId(42)).rejects.toThrow('Failed to fetch contact logs');
@@ -239,8 +286,7 @@ describe('contact-lookup-details actions', () => {
     it.each(['1 OR 1=1', '5; DROP', "1' OR '1'='1", '', 'abc', '  7  '])(
       'rejects %j before reaching the service',
       async (payload) => {
-        mockGetSession.mockResolvedValueOnce(mockAuthSession);
-
+  
         await expect(
           getContactLogsByContactId(payload as unknown as number)
         ).rejects.toThrow('Invalid Contact ID');
@@ -249,7 +295,6 @@ describe('contact-lookup-details actions', () => {
     );
 
     it('passes a digits-only ID through to the service as a number', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogsByContactId.mockResolvedValueOnce([]);
 
       await getContactLogsByContactId('42' as unknown as number);
