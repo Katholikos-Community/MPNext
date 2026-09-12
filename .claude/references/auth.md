@@ -41,8 +41,9 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 |------|---------|
 | `src/lib/auth.ts` | Server-side Better Auth configuration |
 | `src/lib/auth-client.ts` | Client-side auth client (`authClient`) |
-| `src/app/api/auth/[...all]/route.ts` | Route handler (all auth endpoints) |
+| `src/app/api/auth/[...all]/route.ts` | Allowlisted route handler — only `GET /get-session`, `GET /callback/ministry-platform`, `POST /sign-in/social` reach better-auth; everything else 404s |
 | `src/proxy.ts` | Route protection (session cookie check) |
+| `src/app/auth-error/page.tsx` | Landing page for a failed OAuth callback (`onAPIError.errorURL`) — outside the (web) route group, public in `src/proxy.ts` |
 | `src/contexts/user-context.tsx` | `UserProvider` — loads MP user profile client-side |
 | `src/contexts/session-context.tsx` | `useAppSession()` — thin wrapper around `authClient.useSession()` |
 | `src/components/layout/auth-wrapper.tsx` | Server guard for the (web) group — redirects to `/signin` (no session) or `/session-error` (session without `userGuid`) |
@@ -227,6 +228,25 @@ user: {
 
 ### Disabled Endpoints
 
+**The route allowlist is now the primary control.** better-auth 1.7.4 mounts
+~30 endpoints under `/api/auth/*`, but this app's browser client calls exactly
+three: `GET /get-session`, `GET /callback/ministry-platform`, and
+`POST /sign-in/social`. `src/app/api/auth/[...all]/route.ts` exports
+`allowedAuthRoutes` and 404s any request whose method+path isn't in it —
+deny-by-default, so a new endpoint a future better-auth version adds is closed
+until someone deliberately opens it here, rather than silently exposed.
+`disabledPaths` below (matched inside `auth.handler` itself) remains as
+defense in depth for the specific paths it names.
+
+`POST /sign-out` and `GET /error` are deliberately NOT in the allowlist:
+sign-out runs server-side via `auth.api.signOut()` (see
+[Logout Flow](#logout-flow)), so no HTTP sign-out route is needed, and OAuth
+failures now redirect to this app's own `/auth-error` page instead of
+better-auth's built-in error page (see [OAuth Flow](#oauth-flow)). If the
+browser ever needs to call `authClient.signOut()` directly, `POST /sign-out`
+would need to be added to `allowedAuthRoutes` first — the 404 today makes that
+missing step loud rather than a silent no-op.
+
 `src/lib/auth.ts` exports `disabledAuthPaths` and passes it as `disabledPaths`:
 
 ```typescript
@@ -341,6 +361,14 @@ export const authClient = createAuthClient({
 7. UserProvider calls getCurrentUserProfile(userGuid) → loads MP profile
 ```
 
+**On failure**, better-auth's callback redirects to `onAPIError.errorURL`
+(`/auth-error`, configured in `src/lib/auth.ts`) with the failure code as a
+query parameter: `/auth-error?error=<code>` (and, when available,
+`&error_description=<text>`, which `src/app/auth-error/page.tsx` never
+renders). This replaces better-auth's built-in `/api/auth/error` page, which
+the route allowlist (see [Disabled Endpoints](#disabled-endpoints)) no longer
+exposes.
+
 ## Logout Flow
 
 ```
@@ -354,6 +382,10 @@ export const authClient = createAuthClient({
 
 No `id_token_hint` is passed (optional in OIDC spec). The `post_logout_redirect_uri` must be registered in the MP OAuth client configuration.
 
+Sign-out is entirely server-side (`auth.api.signOut()`, called in-process from
+the server action) — the browser never calls a `/sign-out` HTTP endpoint, which
+is why `POST /sign-out` is not in the route allowlist (see [Disabled Endpoints](#disabled-endpoints)).
+
 ## Route Protection (`src/proxy.ts`)
 
 Uses `getSessionCookie()` from `better-auth/cookies` for fast cookie-only checks (no JWT decoding or API calls).
@@ -362,6 +394,10 @@ Uses `getSessionCookie()` from `better-auth/cookies` for fast cookie-only checks
 
 - `/api/*` — All API routes (Better Auth handles its own auth)
 - `/signin` — Sign-in page
+- `/auth-error` — OAuth-failure landing page. Must stay public: a session-less
+  visitor sent here after a failed callback would otherwise be bounced to
+  `/signin`, which auto-starts OAuth again — a loop that never shows the
+  failure.
 - `/_next/*`, `/favicon.ico`, `/assets/*` — Static assets (excluded by matcher)
 
 ### Protected Paths

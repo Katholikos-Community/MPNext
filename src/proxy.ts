@@ -5,7 +5,11 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Early returns for public paths
-  if (pathname.startsWith('/api') || pathname === '/signin') {
+  // `/auth-error` must stay public: AuthWrapper's session gate would otherwise
+  // bounce an unauthenticated visitor sent here (an OAuth failure) to
+  // `/signin`, which immediately restarts OAuth — a loop that never lets the
+  // user see why sign-in failed.
+  if (pathname.startsWith('/api') || pathname === '/signin' || pathname === '/auth-error') {
     console.log(`Proxy: Allowing public path ${pathname}`);
     return NextResponse.next();
   }

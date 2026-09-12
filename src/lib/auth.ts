@@ -128,6 +128,16 @@ export async function enrichSessionUser<
  * `onRequest` — before rate limiting, plugins, and `sessionMiddleware` — so
  * these return 404 to authenticated and anonymous callers alike.
  *
+ * The route allowlist in `src/app/api/auth/[...all]/route.ts`
+ * (`allowedAuthRoutes`) is now the PRIMARY control: it is deny-by-default, so
+ * any endpoint this list doesn't already know about — including one a future
+ * better-auth version adds — is closed at the HTTP boundary before it ever
+ * reaches `auth.handler`. `disabledPaths` here is defense in depth: it still
+ * closes these specific paths for any caller that reaches `auth.handler`
+ * directly, which is exactly what `src/auth.test.ts` does (it drives
+ * `auth.handler` itself, bypassing the route entirely) — intentional, since
+ * that suite exists to guard this config in isolation from Next.js routing.
+ *
  * `/update-user` is the security-critical one. Its body schema is
  * `z.record(z.string(), z.any())`; it rejects only `email` and passes every
  * other key to `parseUserInput`, which copies any additional field declared
@@ -167,6 +177,20 @@ const options = {
   baseURL: process.env.BETTER_AUTH_URL || process.env.NEXTAUTH_URL,
   secret: process.env.BETTER_AUTH_SECRET || process.env.NEXTAUTH_SECRET,
   disabledPaths: disabledAuthPaths,
+  // Own the OAuth-failure landing page instead of better-auth's built-in
+  // `/api/auth/error` page (which we no longer expose — see
+  // `allowedAuthRoutes` in src/app/api/auth/[...all]/route.ts). Every OAuth
+  // callback failure (an invalid/expired state, a refused account link, a
+  // missing email, an id_token that fails nonce/JWKS verification, ...) goes
+  // through better-auth's `redirectOnError` (node_modules/better-auth/dist/
+  // api/routes/callback.mjs, oauth2/errors.mjs), which appends `?error=<code>`
+  // (and, when available, `&error_description=<text>`) to this URL via
+  // `appendQueryParams` — verified to leave a root-relative URL like this one
+  // untouched (no baseURL prefixing needed). `src/app/auth-error/page.tsx`
+  // reads `error` and maps known codes to plain-English messages.
+  onAPIError: {
+    errorURL: "/auth-error",
+  },
   session: {
     cookieCache: {
       enabled: true,

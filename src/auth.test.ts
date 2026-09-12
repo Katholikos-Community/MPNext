@@ -336,6 +336,16 @@ describe('Auth - OAuth Configuration', () => {
   });
 
   /**
+   * F7 security-review guard: OAuth callback failures must land on this app's
+   * own page, not better-auth's built-in `/api/auth/error` (which the route
+   * allowlist in src/app/api/auth/[...all]/route.ts no longer exposes — see
+   * `allowedAuthRoutes`). See src/app/auth-error/page.tsx and its test.
+   */
+  it('redirects OAuth callback failures to our own /auth-error page', () => {
+    expect(auth.options.onAPIError?.errorURL).toBe('/auth-error');
+  });
+
+  /**
    * Regression guard for the better-auth 1.7 generic-OAuth rewrite.
    *
    * MP's discovery document advertises `id_token_signing_alg_values_supported`,
