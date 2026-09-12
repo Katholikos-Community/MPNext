@@ -77,6 +77,18 @@ describe('proxy', () => {
       expect(mockNext).toHaveBeenCalled();
       expect(mockGetSessionCookie).not.toHaveBeenCalled();
     });
+
+    it('should allow /auth-error path without session check', async () => {
+      // Without this, an unauthenticated visitor redirected here after a
+      // failed OAuth callback would be bounced straight to /signin, which
+      // auto-starts OAuth again — a loop that never shows the failure.
+      const request = createMockRequest('/auth-error');
+
+      await proxy(request);
+
+      expect(mockNext).toHaveBeenCalled();
+      expect(mockGetSessionCookie).not.toHaveBeenCalled();
+    });
   });
 
   describe('Protected Paths', () => {
