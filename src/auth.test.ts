@@ -313,20 +313,24 @@ describe('Auth - OAuth Configuration', () => {
   });
 
   /**
-   * Regression guard for the better-auth 1.7 account-identity change.
+   * Regression guard for the better-auth 1.7 account-identity churn.
    *
-   * 1.7 keys accounts on (issuer, accountId) and refuses to initialize a
-   * discovery provider whose issuer it cannot resolve — a failed discovery
-   * fetch throws straight out of `betterAuth()`. An explicit `accountIssuer`
-   * pins the namespace so a transient MP outage cannot silently re-key existing
-   * accounts, and keeps this module importable without network access.
+   * 1.7.0–1.7.2 keyed accounts on (issuer, accountId) and refused to initialize
+   * a discovery provider whose issuer it could not resolve, which is why this
+   * config used to set an explicit `accountIssuer`. 1.7.3 reverted that:
+   * accounts are identified by (providerId, accountId) as in 1.6 (#11153), and
+   * a discovery failure no longer takes down the auth API (#10978).
+   *
+   * That makes `providerId` the whole stable half of the account key again — if
+   * it ever drifts, every existing user silently becomes a new account. Assert
+   * it stays pinned, and that the removed issuer option has not crept back in
+   * (it would now be silently ignored rather than rejected at runtime).
    */
-  it('pins the account issuer explicitly (better-auth 1.7 guard)', () => {
+  it('keys accounts on a stable providerId, with no issuer pinning', () => {
     const config = getMpProviderConfig();
 
-    expect(config.accountIssuer).toBe(
-      `${process.env.MINISTRY_PLATFORM_BASE_URL}/oauth`,
-    );
+    expect(config.providerId).toBe('ministry-platform');
+    expect(config).not.toHaveProperty('accountIssuer');
   });
 
   /**
@@ -450,5 +454,94 @@ describe('Auth - OAuth Configuration', () => {
     expect(sessionUser.id).not.toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
     // userGuid IS the MP User_GUID (UUID format)
     expect(sessionUser.userGuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+  });
+});
+
+/**
+ * Privilege-escalation guard: session identity must not be reassignable.
+ *
+ * better-auth mounts `/update-user` unconditionally. Its body schema is
+ * `z.record(z.string(), z.any())`, it rejects only `email`, and it hands every
+ * other key to `parseUserInput` — which copies any additional field declared
+ * `input !== false` with no validator, then re-mints the session cookie from
+ * the result. Its only gate is `sessionMiddleware`, which any valid session
+ * cookie satisfies.
+ *
+ * `userGuid` MUST stay `input: true` or sign-in breaks (see the better-auth 1.6
+ * guard above), so the two facts compose into a privilege escalation: any
+ * authenticated user could POST `{ userGuid: "<victim's MP User_GUID>" }` and
+ * inherit that user's MP roles, groups, and write attribution. The fix is
+ * `disabledPaths`, matched in the router's `onRequest` before any handler.
+ *
+ * These two concerns are tested TOGETHER on purpose. The `input: true` guard
+ * above pins the writable half of the tradeoff; on its own it would lock in the
+ * hazard with nothing asserting the door is shut. Removing EITHER protection
+ * must fail the build. Do not delete one of these tests to make the other pass.
+ */
+describe('Auth - disabled account-management endpoints', () => {
+  const authBase = 'http://localhost:3000/api/auth';
+
+  it('pins the exact set of disabled paths', () => {
+    expect(auth.options.disabledPaths).toEqual([
+      '/update-user',
+      '/change-email',
+      '/change-password',
+      '/set-password',
+      '/delete-user',
+      '/delete-user/callback',
+    ]);
+  });
+
+  it('returns 404 for POST /update-user (session identity is not reassignable)', async () => {
+    const response = await auth.handler(
+      new Request(`${authBase}/update-user`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userGuid: 'ab12cd34-ef56-7890-abcd-ef1234509001',
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  /**
+   * Verified by negative control: with `disabledPaths` removed, `/change-email`,
+   * `/change-password` and `/delete-user` all answer **401**, not 404 — they are
+   * mounted and gated only by `sessionMiddleware`, so a session cookie reaches
+   * them. `/set-password` is the exception: better-auth never mounts it without
+   * a credential provider, so it 404s either way and this case asserts nothing
+   * today. It is kept deliberately — if an email/password provider is ever
+   * added, the path appears and this case starts doing real work.
+   */
+  it.each([
+    '/change-email',
+    '/change-password',
+    '/set-password',
+    '/delete-user',
+  ])('returns 404 for POST %s', async (path) => {
+    const response = await auth.handler(
+      new Request(`${authBase}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }),
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  /**
+   * Control: proves the assertions above are meaningful. Without this, a
+   * misconfigured baseURL or basePath would 404 every request and the suite
+   * would pass while the app was wide open.
+   */
+  it('still routes an endpoint that is NOT disabled', async () => {
+    const response = await auth.handler(
+      new Request(`${authBase}/get-session`, { method: 'GET' }),
+    );
+
+    expect(response.status).not.toBe(404);
   });
 });

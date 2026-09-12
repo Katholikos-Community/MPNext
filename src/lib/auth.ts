@@ -89,9 +89,51 @@ export async function enrichSessionUser<
   };
 }
 
+/**
+ * Built-in account-management endpoints better-auth mounts unconditionally,
+ * which this app must NOT expose. `disabledPaths` is matched in the router's
+ * `onRequest` — before rate limiting, plugins, and `sessionMiddleware` — so
+ * these return 404 to authenticated and anonymous callers alike.
+ *
+ * `/update-user` is the security-critical one. Its body schema is
+ * `z.record(z.string(), z.any())`; it rejects only `email` and passes every
+ * other key to `parseUserInput`, which copies any additional field declared
+ * `input !== false` verbatim, with no validator, then re-mints the session
+ * cookie from the result. Because `userGuid` MUST stay `input: true` (see
+ * `userAdditionalFields` above), leaving this path open would let any
+ * authenticated user POST `{ userGuid: "<someone else's MP User_GUID>" }` and
+ * assume that user's identity: their MP roles and groups on every downstream
+ * authorization check, and their `User_ID` on every MP write, so `dp_Audit_Log`
+ * would attribute the caller's actions to the victim.
+ *
+ * `input: false` is NOT an alternative fix — it breaks sign-in (see the comment
+ * on `userAdditionalFields`). As of better-auth 1.6 the `input` flag governs
+ * both "may the OAuth provider profile populate this" and "may a user POST
+ * this", and no value of it satisfies both. The protection therefore has to
+ * live here, at the endpoint layer. A field-level `validator.input` would not
+ * work either: it runs on the provider-profile path too, so it can constrain
+ * the GUID's shape but cannot tell `mapProfileToUser` from an attacker sending
+ * a well-formed GUID.
+ *
+ * The rest are closed because identity is Ministry Platform's — this app does
+ * no self-service account management, and nothing in `src/` calls them.
+ *
+ * `src/auth.test.ts` asserts both halves: that `userGuid` stays writable, and
+ * that these paths 404. Removing either one fails the build.
+ */
+export const disabledAuthPaths = [
+  "/update-user",
+  "/change-email",
+  "/change-password",
+  "/set-password",
+  "/delete-user",
+  "/delete-user/callback",
+];
+
 const options = {
   baseURL: process.env.BETTER_AUTH_URL || process.env.NEXTAUTH_URL,
   secret: process.env.BETTER_AUTH_SECRET || process.env.NEXTAUTH_SECRET,
+  disabledPaths: disabledAuthPaths,
   session: {
     cookieCache: {
       enabled: true,
@@ -112,15 +154,15 @@ const options = {
         {
           providerId: "ministry-platform",
           discoveryUrl: `${mpBaseUrl}/oauth/.well-known/openid-configuration`,
-          // better-auth 1.7 keys accounts on (issuer, accountId) and REFUSES to
-          // initialize a discovery provider whose issuer it cannot pin down —
-          // a failed discovery fetch throws out of `betterAuth()` rather than
-          // degrading silently as it did in 1.6. Declaring the issuer keeps
-          // the account namespace stable (and the module importable without
-          // network access, e.g. in tests/CI). MP's discovery document reports
-          // exactly this value; discovery still supplies the endpoints and the
-          // JWKS used to verify ID tokens.
-          accountIssuer: `${mpBaseUrl}/oauth`,
+          // No issuer pinning here, deliberately. better-auth 1.7.0–1.7.2 keyed
+          // accounts on (issuer, accountId) and refused to initialize a discovery
+          // provider whose issuer it could not resolve, so this config carried an
+          // explicit `accountIssuer`. 1.7.3 reverted both halves: accounts are
+          // identified by (providerId, accountId) again as in 1.6 (#11153), and a
+          // discovery failure no longer takes down the auth API (#10978). The
+          // option was removed along with that revert, so setting it is now a
+          // type error. Discovery still supplies the endpoints and the JWKS used
+          // to verify ID tokens.
           clientId: process.env.OIDC_CLIENT_ID!,
           clientSecret: process.env.OIDC_CLIENT_SECRET!,
           scopes: [
