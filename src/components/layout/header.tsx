@@ -42,7 +42,10 @@ export function Header() {
                     userProfile?.First_Name && userProfile?.Last_Name
                       ? `${userProfile.First_Name} ${userProfile.Last_Name}`
                       : session?.user?.name ||
-                        session?.user?.email ||
+                        // `session.user.email` is a synthetic per-user value
+                        // (see `syntheticEmailForSub` in src/lib/auth.ts); the
+                        // real MP address is the `mpEmail` additional field.
+                        (session?.user as { mpEmail?: string | null } | undefined)?.mpEmail ||
                         "User menu"
                   }
                 >

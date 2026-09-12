@@ -16,6 +16,8 @@ The MP User_GUID (the OAuth `sub` claim) is stored as `user.userGuid` via `addit
 |-------|-------|---------|
 | `session.user.id` | Better Auth internal ID | Auth guards (checking if session exists) |
 | `session.user.userGuid` | MP User_GUID (UUID) | All MP API lookups (`dp_Users`, profile fetching) |
+| `session.user.email` | **Synthetic** — `<sub>@mp.invalid` | Nothing. Never display it or send mail to it. Exists only to satisfy better-auth's `required, unique` email column. |
+| `session.user.mpEmail` | Real MP email, or `null` | Display fallbacks (e.g. the header tooltip). MP does not require an email, so always handle `null`. |
 
 **Why?** Better Auth explicitly strips the `id` from `getUserInfo` when creating user records (`const { id: _, ...restUserInfo } = userInfo` in `link-account.mjs`). The `id` becomes the `accountId` in the account table, not `user.id`.
 
@@ -65,6 +67,77 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 - **State**: OAuth state stored in cookie (`storeStateStrategy: "cookie"`)
 - **No database**: Uses in-memory adapter (data lost on server restart, users must re-login)
 
+### Email is never a key (synthetic `email`, real address in `mpEmail`)
+
+> 🔒 **better-auth's `email` column holds a synthetic per-user value, not the
+> MP address.** better-auth's core user schema declares `email` as
+> `required: true, unique: true`, and its OAuth callback uses `findUserByEmail`
+> as a fallback identity lookup (`oauth2/link-account.mjs`). Ministry Platform
+> enforces **no** uniqueness on email addresses — households routinely share
+> one across several contacts, each of whom may have a `dp_Users` login. The
+> only unique identity MP gives us is `sub` (the User_GUID), so that is the
+> only thing better-auth is allowed to key on.
+>
+> `mapProfileToUser` therefore returns `email: syntheticEmailForSub(sub)`
+> (`<sub lowercased>@mp.invalid`, RFC 2606 reserved TLD) and moves the real
+> address to the `mpEmail` additional field (nullable — MP does not require an
+> email, and sign-in must not depend on one). The generic-oauth wrapper builds
+> the local user as `{ email: raw.email, ..., ...mapped }`, so the mapped value
+> is what better-auth persists. Two MP users sharing a real email now become
+> two distinct better-auth users; neither is merged (the F2 takeover) nor
+> refused (the lockout that `accountLinking: false` alone produced, and that a
+> persistent database's `unique` constraint would have enforced too).
+>
+> **Consequences for app code:** never read `session.user.email` for display
+> or mail; use `session.user.mpEmail` (cast, as with `userGuid`) and handle
+> `null`. `src/components/layout/header.tsx` is the one current reader.
+>
+> **`sub` is validated, not defaulted.** `getUserInfo` runs `sanitizeGuid` on
+> `profile.sub` and returns `null` if it is missing or malformed — better-auth's
+> contract for "user info unusable", which makes the callback redirect with
+> `unable_to_get_user_info` and mint nothing. (Throwing there is *not*
+> equivalent: `provider.getUserInfo` is not wrapped in a try/catch in the
+> callback route.) `mapProfileToUser` additionally throws if `sub` is somehow
+> absent, and `userGuid` is `required: true`, so better-auth's `parseInputData`
+> rejects user creation without it. The old `String(profile.sub ?? "")`
+> fallback, which produced sessions with `userGuid: ""`, is gone.
+>
+> `src/auth.test.ts` guards all of this: the synthetic-email mapping, the
+> `mpEmail: null` case, the `sub` refusals in `getUserInfo`, the
+> `required` guard through the real better-auth parser, and an end-to-end
+> `handleOAuthUserInfo` run in which two subs sharing one real email yield two
+> distinct users.
+
+### Account linking (disabled)
+
+> 🔒 **`account.accountLinking.enabled` is explicitly `false`.** With a single
+> OAuth provider, identity belongs to Ministry Platform, not better-auth —
+> there is no legitimate reason for a second provider account to be linked
+> onto an existing user by matching email. But that is exactly what
+> better-auth's default OAuth callback does: when no account exists yet for
+> the incoming `(providerId, sub)`, it falls back to `findUserByEmail`, and if
+> both the stored user and the incoming profile are `emailVerified`, it
+> implicitly links the new `sub` onto that **existing** user and issues a
+> session for them. Since MP household/contact data commonly shares one email
+> across multiple people, this is a real identity-takeover path: the second
+> person to sign in with a shared email would silently inherit the first
+> person's `userGuid` and MP `User_ID`.
+>
+> Setting `accountLinking: { enabled: false }` makes
+> `node_modules/better-auth/dist/oauth2/link-account.mjs` take its
+> `"account not linked"` refusal branch instead of merging
+> (`accountLinking?.enabled === false` is one of the OR'd conditions gating
+> that branch). This pairs with `getUserInfo` returning the provider's real
+> `email_verified` claim (`profile.email_verified === true`, defaulting to
+> `false`) rather than a hardcoded `true` — see the table entry below.
+>
+> `src/auth.test.ts` guards both halves: a config assertion that
+> `accountLinking.enabled` stays `false`, `getUserInfo` guards for the
+> `emailVerified` claim, and a behavioral test that drives the real
+> `handleOAuthUserInfo` (from `better-auth/oauth2`) against the app's actual
+> in-memory `auth` instance with two different `sub` values sharing one
+> email, asserting the second sign-in is refused rather than merged.
+
 ### genericOAuth Configuration
 
 | Setting | Value | Notes |
@@ -73,8 +146,8 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 | `discoveryUrl` | `${MP_BASE_URL}/oauth/.well-known/openid-configuration` | OIDC auto-discovery |
 | `scopes` | `openid`, `offline_access`, `dataplatform/scopes/all` | Full MP API access |
 | `pkce` | `false` | Explicitly disabled — 1.7 defaults this to `true` (see 1.7 notes below) |
-| `getUserInfo` | Custom callback | Fetches OIDC userinfo, returns `sub: profile.sub` |
-| `mapProfileToUser` | Custom callback | Stores `profile.sub` as `userGuid` |
+| `getUserInfo` | Custom callback | Fetches OIDC userinfo; validates `sub` with `sanitizeGuid` and returns `null` (sign-in refused) if unusable; returns the real `email` on the raw profile and `emailVerified: profile.email_verified === true` (not hardcoded — see [Account linking](#account-linking-disabled)) |
+| `mapProfileToUser` | Custom callback | Returns `userGuid: sub`, `email: <sub>@mp.invalid` (synthetic — see [Email is never a key](#email-is-never-a-key-synthetic-email-real-address-in-mpemail)), `mpEmail: real address or null`; throws if `sub` is absent |
 
 ### Better Auth 1.7 migration notes
 
