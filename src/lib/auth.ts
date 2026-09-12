@@ -18,14 +18,47 @@ const mpBaseUrl = process.env.MINISTRY_PLATFORM_BASE_URL!;
  * profile lookup (avatar, user menu, User_ID resolution). There is no
  * user-facing form that sets this field, so allowing input carries no practical
  * risk here. `src/auth.test.ts` guards this against future regressions.
+ *
+ * `userGuid` is `required: true`: better-auth's `parseInputData` rejects user
+ * creation with `400 userGuid is required` if the mapped profile lacks it, so
+ * a session can never be minted without an MP identity. `getUserInfo` below
+ * already refuses profiles without a valid `sub`, so this is the second gate.
+ *
+ * `mpEmail` carries the user's real Ministry Platform email address. It is
+ * nullable because MP does not require an email on a contact, and sign-in must
+ * not depend on it — identity is `sub`. better-auth's own `email` column is
+ * populated with a synthetic per-user value instead; see `mapProfileToUser`.
  */
 export const userAdditionalFields = {
   userGuid: {
+    type: "string" as const,
+    required: true,
+    input: true,
+  },
+  mpEmail: {
     type: "string" as const,
     required: false,
     input: true,
   },
 };
+
+/**
+ * Domain for the synthetic per-user `email` handed to better-auth.
+ *
+ * better-auth's core user schema declares `email` as `required: true,
+ * unique: true`, and its OAuth callback uses `findUserByEmail` as a fallback
+ * identity lookup. Ministry Platform enforces no uniqueness on email addresses
+ * — households routinely share one — so a real MP email must never become a
+ * better-auth key. Deriving `email` from `sub` (the MP User_GUID, the actual
+ * primary key) makes collisions impossible by construction. `.invalid` is the
+ * RFC 2606 reserved TLD, so the value can never be mistaken for, or delivered
+ * to, a real mailbox. The real address lives in `mpEmail`.
+ */
+export const SYNTHETIC_EMAIL_DOMAIN = "mp.invalid";
+
+export function syntheticEmailForSub(sub: string): string {
+  return `${sub.toLowerCase()}@${SYNTHETIC_EMAIL_DOMAIN}`;
+}
 
 // Process-wide cache of User_GUID → MP User_ID. customSession runs on every
 // getSession() call, so without a cache each request would do a dp_Users
@@ -215,6 +248,34 @@ const options = {
 
             const profile = await response.json();
 
+            // `sub` is the MP User_GUID and the only identity this app trusts.
+            // A profile without a valid one is unusable: better-auth would
+            // resolve the account subject to "" and the session would carry no
+            // `userGuid`, which is exactly the broken state `AuthWrapper` has
+            // to route to /session-error. Refuse it here instead. Returning
+            // null is better-auth's contract for "user info unusable": the
+            // callback redirects to its error URL with
+            // `unable_to_get_user_info` and no session is minted. (Throwing
+            // is NOT equivalent — `provider.getUserInfo` is not wrapped in a
+            // try/catch in the callback route, so a throw surfaces as an
+            // unhandled error rather than a clean sign-in failure.)
+            // `sanitizeGuid` doubles as the shape check, because `userGuid` is
+            // interpolated into MP `$filter` strings downstream.
+            let sub: string;
+            try {
+              sub = sanitizeGuid(String(profile.sub ?? ""));
+            } catch {
+              console.error(
+                JSON.stringify({
+                  event: "auth.userinfo.invalid_sub",
+                  message:
+                    "MP userinfo returned no usable sub (User_GUID); refusing sign-in",
+                  hasSub: profile.sub !== undefined && profile.sub !== null,
+                }),
+              );
+              return null;
+            }
+
             // `sub` (not `id`) is what better-auth 1.7 reads for the account
             // subject. MP's discovery document advertises
             // `id_token_signing_alg_values_supported`, so the provider is
@@ -222,6 +283,11 @@ const options = {
             // `profile.sub` from this raw profile. Returning only `id` (the
             // pre-1.7 shape) resolves the subject to "" and breaks account
             // identity. `src/auth.test.ts` guards this.
+            //
+            // `email` here is the REAL MP address, kept on the raw profile so
+            // `mapProfileToUser` can move it into `mpEmail`. It does not reach
+            // better-auth's `email` column — `mapProfileToUser` overrides that
+            // with a synthetic value (see `syntheticEmailForSub`).
             //
             // `emailVerified` MUST reflect the provider's own claim, not be
             // hardcoded true. better-auth's OAuth callback uses this value
@@ -231,23 +297,43 @@ const options = {
             // send `email_verified` at all, so default to false rather than
             // assume it. `src/auth.test.ts` guards this.
             return {
-              sub: profile.sub,
-              email: profile.email,
+              sub,
+              email: typeof profile.email === "string" ? profile.email : null,
               name: `${profile.given_name} ${profile.family_name}`,
               image: undefined,
               emailVerified: profile.email_verified === true,
             };
           },
-          // Map the OAuth sub claim (User_GUID) to our custom userGuid field.
-          // Better Auth generates its own internal user.id, so we need a
-          // separate field to store the MP User_GUID for API lookups.
-          // As of 1.7 `mapProfileToUser` receives the raw profile returned by
-          // `getUserInfo` above and may not return `id` — provider identity is
-          // owned by `accountSubject`. The return type allows arbitrary extra
-          // keys, so no cast is needed.
+          // Maps the raw MP profile onto the local better-auth user record.
+          //
+          // - `userGuid`: the OAuth `sub` (MP User_GUID). better-auth generates
+          //   its own internal `user.id`, so this separate field is what every
+          //   MP lookup keys on. `getUserInfo` has already validated `sub`, so
+          //   a missing one here is a programming error, not a provider
+          //   condition — fail loudly rather than mint a session with an empty
+          //   identity.
+          // - `email`: SYNTHETIC, derived from `sub`. The generic-oauth wrapper
+          //   builds the local user as `{ email: raw.email, ..., ...mapped }`,
+          //   so this override is what lands in better-auth's unique `email`
+          //   column. A real MP email is never a better-auth key.
+          // - `mpEmail`: the real MP address, or null when MP has none. Nullable
+          //   on purpose: MP does not require an email, and sign-in must not
+          //   depend on one.
+          //
+          // As of 1.7 `mapProfileToUser` may not return `id` — provider
+          // identity is owned by `accountSubject`. The return type allows
+          // arbitrary extra keys, so no cast is needed.
           mapProfileToUser: (profile) => {
+            const sub = typeof profile.sub === "string" ? profile.sub : "";
+            if (!sub) {
+              throw new Error(
+                "mapProfileToUser: profile has no sub; getUserInfo must reject this before mapping",
+              );
+            }
             return {
-              userGuid: String(profile.sub ?? ""),
+              userGuid: sub,
+              email: syntheticEmailForSub(sub),
+              mpEmail: typeof profile.email === "string" && profile.email ? profile.email : null,
             };
           },
         },

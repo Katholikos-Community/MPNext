@@ -20,7 +20,7 @@ vi.mock('@/lib/providers/ministry-platform', () => ({
   },
 }));
 
-import { auth, userAdditionalFields, enrichSessionUser } from '@/lib/auth';
+import { auth, userAdditionalFields, enrichSessionUser, syntheticEmailForSub } from '@/lib/auth';
 
 /**
  * Auth Tests
@@ -462,8 +462,95 @@ describe('Auth - OAuth Configuration', () => {
       emailVerified: true,
     });
 
-    expect(mapped).toEqual({ userGuid: guid });
+    expect(mapped).toEqual({
+      userGuid: guid,
+      email: syntheticEmailForSub(guid),
+      mpEmail: 'john@example.com',
+    });
     expect(mapped).not.toHaveProperty('id');
+  });
+
+  /**
+   * F2 (root cause): better-auth's user table declares `email` as
+   * `required: true, unique: true` and its OAuth callback uses
+   * `findUserByEmail` as a fallback identity lookup. Ministry Platform enforces
+   * no uniqueness on email — households share one — so a real MP email must
+   * never reach better-auth's `email` column. `mapProfileToUser` overrides it
+   * with a value derived from `sub`, which IS unique (it is the User_GUID).
+   * The generic-oauth wrapper spreads the mapped object over `raw.email`, so
+   * this override is what better-auth persists.
+   */
+  it('never hands a real MP email to better-auth as the user email (F2 root cause)', async () => {
+    const config = getMpProviderConfig();
+    const guid = 'AB12CD34-EF56-7890-ABCD-EF1234567890';
+
+    const mapped = await config.mapProfileToUser!({
+      sub: guid,
+      email: 'shared-household@example.com',
+      emailVerified: false,
+    });
+
+    expect(mapped.email).toBe(`${guid.toLowerCase()}@mp.invalid`);
+    expect(mapped.email).not.toBe('shared-household@example.com');
+    // The real address is preserved for display, on our own field.
+    expect(mapped.mpEmail).toBe('shared-household@example.com');
+  });
+
+  it('maps a missing MP email to mpEmail: null rather than "" (MP does not require an email)', async () => {
+    const config = getMpProviderConfig();
+    const guid = 'ab12cd34-ef56-7890-abcd-ef1234567890';
+
+    const noEmail = await config.mapProfileToUser!({ sub: guid, emailVerified: false });
+    expect(noEmail.mpEmail).toBeNull();
+    // Sign-in must not depend on the email: the synthetic key is still present.
+    expect(noEmail.email).toBe(syntheticEmailForSub(guid));
+
+    const emptyEmail = await config.mapProfileToUser!({ sub: guid, email: '', emailVerified: false });
+    expect(emptyEmail.mpEmail).toBeNull();
+  });
+
+  it('mapProfileToUser throws rather than minting an empty userGuid when sub is absent', async () => {
+    const config = getMpProviderConfig();
+    // getUserInfo refuses these upstream (see the test below); this is the
+    // defense-in-depth guard so a future refactor cannot reintroduce the old
+    // `String(profile.sub ?? "")` fallback that produced sessions with
+    // userGuid "" — the broken state AuthWrapper routes to /session-error.
+    // The mapper is synchronous, so the throw happens before a promise exists.
+    expect(() =>
+      config.mapProfileToUser!({ email: 'x@example.com', emailVerified: false }),
+    ).toThrow(/no sub/);
+  });
+
+  /**
+   * A profile with no usable `sub` must fail sign-in, not produce a session
+   * with an empty identity. Returning null is better-auth's contract for
+   * "user info unusable": the callback redirects with
+   * `unable_to_get_user_info` and mints nothing. `sanitizeGuid` is the shape
+   * check because `userGuid` is interpolated into MP `$filter` strings.
+   */
+  it.each([
+    ['missing', {}],
+    ['empty string', { sub: '' }],
+    ['not a GUID', { sub: "abc' OR 1=1 --" }],
+    ['numeric', { sub: 12345 }],
+  ])('returns null from getUserInfo when sub is %s (refuses sign-in)', async (_label, subClaim) => {
+    const config = getMpProviderConfig();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ...subClaim,
+          given_name: 'No',
+          family_name: 'Sub',
+          email: 'nosub@example.com',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await expect(
+      config.getUserInfo!({ accessToken: 'access-token' } as OAuth2Tokens),
+    ).resolves.toBeNull();
   });
 
   /**
@@ -489,11 +576,37 @@ describe('Auth - OAuth Configuration', () => {
     // before creating the user record.
     const parsed = parseAdditionalUserInputFromProviderProfile(
       options,
-      { userGuid: guid },
+      { userGuid: guid, mpEmail: 'john@example.com' },
       'create',
     );
 
     expect(parsed).toHaveProperty('userGuid', guid);
+    // The real MP address must survive the same filter, or the header loses
+    // its email fallback (better-auth's own `email` is synthetic).
+    expect(parsed).toHaveProperty('mpEmail', 'john@example.com');
+  });
+
+  /**
+   * `userGuid` is `required: true`, so better-auth's `parseInputData` refuses
+   * to create a user record without it (`400 userGuid is required`). This is
+   * the last gate behind getUserInfo's sub validation: no code path can mint
+   * a session whose MP identity is missing. Runs the REAL better-auth parser.
+   */
+  it('refuses to create a user record without userGuid (required additional field)', () => {
+    const options = { user: { additionalFields: userAdditionalFields } };
+
+    expect(() =>
+      parseAdditionalUserInputFromProviderProfile(options, { mpEmail: 'x@example.com' }, 'create'),
+    ).toThrow(/userGuid is required/);
+  });
+
+  it('allows a user record without mpEmail (MP does not require an email)', () => {
+    const guid = 'ab12cd34-ef56-7890-abcd-ef1234567890';
+    const options = { user: { additionalFields: userAdditionalFields } };
+
+    expect(() =>
+      parseAdditionalUserInputFromProviderProfile(options, { userGuid: guid, mpEmail: null }, 'create'),
+    ).not.toThrow();
   });
 
   /**
@@ -643,6 +756,24 @@ describe('Auth - disabled account-management endpoints', () => {
  * library source — see the comment on `accountLinking` in `src/lib/auth.ts`).
  */
 describe('Auth - F2 account-linking behavioral guard', () => {
+  /** Same lookup as in 'Auth - OAuth Configuration'; scoped per describe. */
+  function getMpProviderConfig(): GenericOAuthConfig {
+    const plugins =
+      (auth.options as { plugins?: Array<Record<string, unknown>> }).plugins ?? [];
+    const plugin = plugins.find((pl) => pl.id === 'generic-oauth') as
+      | { options?: GenericOAuthOptions }
+      | undefined;
+    const config = plugin?.options?.config?.find(
+      (c) => c.providerId === 'ministry-platform',
+    );
+    if (!config) throw new Error('ministry-platform generic OAuth config not found');
+    return config;
+  }
+
+  // Deliberately BYPASSES mapProfileToUser: this simulates a regression in
+  // which the same real email reaches better-auth's `email` column for two
+  // subs. `userGuid` is supplied because it is a required field — without it
+  // user creation fails on "userGuid is required" before linking is reached.
   function buildUserInfo(sub: string, email: string) {
     return {
       id: sub,
@@ -650,6 +781,7 @@ describe('Auth - F2 account-linking behavioral guard', () => {
       emailVerified: true,
       name: 'Shared Email User',
       image: undefined,
+      userGuid: sub,
     };
   }
 
@@ -690,5 +822,75 @@ describe('Auth - F2 account-linking behavioral guard', () => {
     expect(second.error).toBe('account not linked');
     expect(second.data).toBeNull();
     expect(second.data?.user.id).not.toBe(first.data?.user.id);
+  });
+
+  /**
+   * The root-cause fix, end to end: run two MP profiles that share one REAL
+   * email through the app's real `mapProfileToUser` and then through
+   * better-auth's real `handleOAuthUserInfo`. Because the local `email` is
+   * derived from `sub`, the two never collide: both sign-ins succeed, produce
+   * two distinct users with their own `userGuid`, and neither is refused or
+   * merged. The shared real address survives on `mpEmail` for both.
+   *
+   * This is the case `accountLinking.enabled: false` alone could not solve —
+   * it turned takeover into lockout for the second person. With a persistent
+   * database the `unique` constraint on `email` would have rejected them too.
+   */
+  it('two MP users sharing a real email become two distinct better-auth users', async () => {
+    const config = getMpProviderConfig();
+    const context = await auth.$context;
+    const c = {
+      context,
+      headers: new Headers(),
+      setCookie: () => {},
+      getCookie: () => null,
+    } as unknown as GenericEndpointContext;
+
+    const sharedEmail = 'household@example.com';
+    const subOne = 'f2c0ffee-0000-4000-8000-000000000001';
+    const subTwo = 'f2c0ffee-0000-4000-8000-000000000002';
+
+    // Mirror the generic-oauth wrapper: `{ email: raw.email, ..., ...mapped }`.
+    async function localUserFor(sub: string, name: string) {
+      const raw = { sub, email: sharedEmail, name, emailVerified: false };
+      const mapped = await config.mapProfileToUser!(raw);
+      // `mapped.email` is typed `string | null | undefined`; the wrapper's
+      // spread makes it the final value, and the mapping test above proves it
+      // is always a string here.
+      return {
+        id: sub,
+        emailVerified: false,
+        name,
+        image: undefined,
+        ...mapped,
+        email: mapped.email as string,
+      };
+    }
+
+    const first = await handleOAuthUserInfo(c, {
+      userInfo: await localUserFor(subOne, 'Pat Household'),
+      account: { providerId: 'ministry-platform', accountId: subOne },
+      callbackURL: '/',
+    });
+    const second = await handleOAuthUserInfo(c, {
+      userInfo: await localUserFor(subTwo, 'Sam Household'),
+      account: { providerId: 'ministry-platform', accountId: subTwo },
+      callbackURL: '/',
+    });
+
+    expect(first.error).toBeNull();
+    expect(second.error).toBeNull();
+    expect(first.isRegister).toBe(true);
+    expect(second.isRegister).toBe(true);
+
+    const u1 = first.data!.user as Record<string, unknown>;
+    const u2 = second.data!.user as Record<string, unknown>;
+    expect(u1.id).not.toBe(u2.id);
+    expect(u1.userGuid).toBe(subOne);
+    expect(u2.userGuid).toBe(subTwo);
+    expect(u1.email).toBe(syntheticEmailForSub(subOne));
+    expect(u2.email).toBe(syntheticEmailForSub(subTwo));
+    expect(u1.mpEmail).toBe(sharedEmail);
+    expect(u2.mpEmail).toBe(sharedEmail);
   });
 });
