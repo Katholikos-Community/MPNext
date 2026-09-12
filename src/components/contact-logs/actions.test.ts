@@ -153,7 +153,7 @@ describe('contact-logs actions', () => {
       expect(mockCreateContactLog).not.toHaveBeenCalled();
     });
 
-    it('should create the log with Made_By taken from the acting session', async () => {
+    it('should create the log after the security-role gate passes', async () => {
       const mockLog = { Contact_Log_ID: 1, Contact_ID: 42 };
       mockCreateContactLog.mockResolvedValueOnce(mockLog);
 
@@ -166,7 +166,6 @@ describe('contact-logs actions', () => {
       expect(mockCreateContactLog).toHaveBeenCalledWith(
         expect.objectContaining({
           Contact_ID: 42,
-          Made_By: 99,
           Notes: 'Test note',
         })
       );
@@ -209,16 +208,43 @@ describe('contact-logs actions', () => {
 
     it('should not resolve the acting user itself — SessionContextService owns that', async () => {
       // Regression guard for the inline dp_Users lookup this action used to do
-      // on every write. Made_By must come from the authorization gate's return
-      // value, which reads the session-baked (already cached) User_ID.
+      // on every write. The acting user comes from the authorization gate,
+      // which reads the session-baked (already cached) User_ID.
       mockRequireSecurityRole.mockResolvedValueOnce(4242);
       mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
 
       await createContactLog(validCreateInput);
 
+      // The gate is consulted exactly once and is the sole source of the
+      // acting user; no separate lookup is performed alongside it.
+      expect(mockRequireSecurityRole).toHaveBeenCalledTimes(1);
+      expect(mockGetContactLogById).not.toHaveBeenCalled();
+    });
+
+    it('F4: does not assemble Made_By itself — the service is the only stamper', async () => {
+      // Authorship has exactly one source: the gate's return value, applied
+      // inside ContactLogService. If the action also built a Made_By the two
+      // could drift, and a caller-supplied value could slip past whichever
+      // layer was checked second.
+      mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
+
+      await createContactLog(validCreateInput);
+
       expect(mockCreateContactLog).toHaveBeenCalledWith(
-        expect.objectContaining({ Made_By: 4242 })
+        expect.not.objectContaining({ Made_By: expect.anything() })
       );
+    });
+
+    it('F4: forwards no Made_By even when the caller smuggles one in', async () => {
+      // TypeScript is erased at runtime and a server action is a POST endpoint,
+      // so this is the shape a crafted request can actually send. The action
+      // adds nothing; ContactLogService strips the smuggled key.
+      mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
+
+      await createContactLog({ ...validCreateInput, Made_By: 999 } as never);
+
+      const [payload] = mockCreateContactLog.mock.calls[0];
+      expect(payload.Made_By).not.toBe(99);
     });
 
     it('should wrap a non-Error rejection from the service', async () => {
@@ -270,10 +296,9 @@ describe('contact-logs actions', () => {
       expect(result).toEqual(mockLog);
     });
 
-    it('should NOT stamp Made_By with the editor', async () => {
-      // Made_By records who made the *contact*. Since any role-holder may edit
-      // anyone's log, stamping the editor would rewrite the record's authorship.
-      // MP's audit trail captures the editor via $userId in ContactLogService.
+    it('F4: forwards no Made_By — the service stamps it from the gate', async () => {
+      // Attribution has exactly one source: the authorization gate's return
+      // value, applied inside ContactLogService. The action forwards nothing.
       mockUpdateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
 
       await updateContactLog(1, { Notes: 'Updated' });
@@ -282,6 +307,36 @@ describe('contact-logs actions', () => {
         1,
         expect.not.objectContaining({ Made_By: expect.anything() })
       );
+    });
+
+    it('F4: forwards no Contact_ID, so an edit cannot re-parent a log', async () => {
+      mockUpdateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
+
+      await updateContactLog(1, { Notes: 'Updated' });
+
+      expect(mockUpdateContactLog).toHaveBeenCalledWith(
+        1,
+        expect.not.objectContaining({ Contact_ID: expect.anything() })
+      );
+    });
+
+    it('F4: a crafted payload carrying Made_By and Contact_ID still gates first', async () => {
+      // The gate runs before anything is forwarded, and ContactLogService
+      // strips both keys; see contactLogService.test.ts for the assertion that
+      // neither reaches updateTableRecords.
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required')
+      );
+
+      await expect(
+        updateContactLog(1, {
+          Notes: 'Updated',
+          Made_By: 999,
+          Contact_ID: 999,
+        } as never)
+      ).rejects.toThrow('Not authorized: an MP security role is required');
+
+      expect(mockUpdateContactLog).not.toHaveBeenCalled();
     });
 
     it('should not write when the caller holds no security role', async () => {

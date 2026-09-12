@@ -649,6 +649,38 @@ response body. The four structured events above (`mp.read.unauthorized`,
 `src/lib/auth.ts`) are the greppable contract this policy exists alongside; they already
 log identifiers only and are unaffected by it.
 
+#### Attribution is server-authoritative (F4, closed 2026-09-12)
+
+`Contact_Log.Made_By` and `Contact_Log.Contact_ID` are **never taken from the caller**.
+A server action is a POST endpoint whose payload shape the caller controls, and
+TypeScript types are erased at runtime, so a narrow parameter type guards nothing on
+its own. Before this was closed, a role-holder could re-attribute a pastoral log to a
+different staff member, or move it onto a different contact's record, with one crafted
+request.
+
+The rule, enforced in `ContactLogService` (the boundary every path goes through,
+including one that bypasses the actions):
+
+| Field | Create | Update |
+|---|---|---|
+| `Made_By` | the authorization gate's returned `User_ID` | the authorization gate's returned `User_ID` |
+| `Contact_ID` | caller-supplied subject contact, validated by `sanitizeNumericId` | **never sent** — MP preserves the row's existing value |
+
+Mechanically: `Made_By` (and on update `Contact_ID`) are added to the `.omit({...})` on
+`ContactLogSchema`, and a Zod object parse strips keys the schema does not declare — so
+a smuggled key is *dropped*, not merely untyped. The server-stamped `Made_By` is then
+spread **last** into the record so nothing above it can win. `requireSecurityRole` runs
+*first* in both methods, since its return value is the only source of attribution.
+
+Two consequences worth knowing:
+
+- `Made_By` on an edited log now reads as **the staff member who last wrote the row**,
+  not necessarily whoever originally made the contact. This was a deliberate call
+  (2026-09-12); MP's audit trail additionally records every edit via `$userId`.
+- The actions deliberately assemble **neither** field. Attribution has exactly one
+  source; two layers stamping it could drift, and a caller value could slip past
+  whichever was checked second.
+
 ### Caching: per request, never across requests
 
 The gate now runs at up to three layers per request, so the `dp_User_Roles` read is
@@ -718,6 +750,7 @@ server-side; defence in depth).
 | **F10** (Low) — `ContactService.updateContact` wrote with no authorization | 2026-09-12 | Calls `requireSecurityRole({ table: "Contacts", operation: "update" })` and uses its `User_ID` for `$userId` |
 | **F11** (Low) — `getMpTimezone` had no check at all | 2026-09-12 | Authenticated-session check (its only consumer is the role-gated contact page) |
 | **F5** (Medium) — member PII and pastoral notes written to server logs at info level | 2026-09-12 | Removed all `console.log`/`.debug`/`.info` from non-script `src/`; error logs now carry identifiers/shape only (no request bodies, result sets, `Notes`, or `$filter`/full URLs); see § Logging policy above |
+| **F4** (Medium) — contact-log writes accepted `Made_By`/`Contact_ID` from the caller | 2026-09-12 | `ContactLogService` stamps `Made_By` from the gate and strips both keys via the schema `.omit()`; `Contact_ID` is never sent on update; see § Attribution is server-authoritative above |
 
 ## Environment Variables
 

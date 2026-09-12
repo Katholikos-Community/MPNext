@@ -246,7 +246,6 @@ describe('ContactLogService', () => {
         Contact_ID: 42,
         Contact_Date: '2026-05-17',
         Contact_Log_Type_ID: 1,
-        Made_By: 100,
         Notes: 'Test note',
         Planned_Contact_ID: null,
         Contact_Successful: null,
@@ -261,7 +260,8 @@ describe('ContactLogService', () => {
             Contact_ID: 42,
             Contact_Date: '2026-05-17 00:00:00',
             Notes: 'Test note',
-            Made_By: 100,
+            // Server-stamped from the authorization gate, not the caller (F4).
+            Made_By: 500,
           }),
         ],
         { $userId: 500 },
@@ -284,7 +284,6 @@ describe('ContactLogService', () => {
           Contact_ID: 42,
           Contact_Date: '2026-05-17',
           Contact_Log_Type_ID: 1,
-          Made_By: 100,
           Notes: 'Test note',
           Planned_Contact_ID: null,
           Contact_Successful: null,
@@ -305,7 +304,6 @@ describe('ContactLogService', () => {
         Contact_ID: 42,
         Contact_Date: '2026-05-17',
         Contact_Log_Type_ID: 1,
-        Made_By: 100,
         Notes: 'Test note',
         Planned_Contact_ID: null,
         Contact_Successful: null,
@@ -329,7 +327,6 @@ describe('ContactLogService', () => {
         Contact_ID: 42,
         Contact_Date: '2026-05-17T03:33:00.000Z',
         Contact_Log_Type_ID: 1,
-        Made_By: 100,
         Notes: 'Test',
         Planned_Contact_ID: null,
         Contact_Successful: null,
@@ -353,7 +350,6 @@ describe('ContactLogService', () => {
           Contact_ID: 42,
           Contact_Date: '2026-05-17',
           Contact_Log_Type_ID: 1,
-          Made_By: 100,
           Notes: 'Test',
           Planned_Contact_ID: null,
           Contact_Successful: null,
@@ -361,6 +357,53 @@ describe('ContactLogService', () => {
           Feedback_Entry_ID: null,
         })
       ).rejects.toThrow('Failed to create contact log record');
+    });
+
+    // --- F4: Made_By and Contact_ID are server-authoritative ---------------
+    //
+    // A server action is a POST endpoint whose payload shape the caller
+    // controls; TypeScript is erased at runtime, so these drive the service
+    // with the shapes a crafted request could actually send.
+
+    it('F4: ignores a caller-supplied Made_By and stamps the gate User_ID', async () => {
+      mockRequireSecurityRole.mockResolvedValueOnce(4242);
+      mockCreateTableRecords.mockResolvedValueOnce([{ Contact_Log_ID: 1 }]);
+
+      const service = await ContactLogService.getInstance();
+      await service.createContactLog({
+        Contact_ID: 42,
+        Contact_Date: '2026-05-17',
+        Contact_Log_Type_ID: 1,
+        Made_By: 999,
+        Notes: 'Test note',
+        Planned_Contact_ID: null,
+        Contact_Successful: null,
+        Original_Contact_Log_Entry: null,
+        Feedback_Entry_ID: null,
+      } as never);
+
+      const [, records] = mockCreateTableRecords.mock.calls[0];
+      expect(records[0].Made_By).toBe(4242);
+      expect(records[0].Made_By).not.toBe(999);
+    });
+
+    it('F4: rejects a non-positive Contact_ID instead of writing it', async () => {
+      const service = await ContactLogService.getInstance();
+
+      await expect(
+        service.createContactLog({
+          Contact_ID: 0,
+          Contact_Date: '2026-05-17',
+          Contact_Log_Type_ID: 1,
+          Notes: 'Test note',
+          Planned_Contact_ID: null,
+          Contact_Successful: null,
+          Original_Contact_Log_Entry: null,
+          Feedback_Entry_ID: null,
+        } as never),
+      ).rejects.toThrow();
+
+      expect(mockCreateTableRecords).not.toHaveBeenCalled();
     });
 
     it('rejects invalid non-date fields via Zod validation', async () => {
@@ -371,8 +414,8 @@ describe('ContactLogService', () => {
           Contact_ID: 42,
           Contact_Date: '2026-05-17',
           Contact_Log_Type_ID: null,
-          // Missing Made_By (required number)
-          Notes: 'Test',
+          // Notes must be a string
+          Notes: 12345,
         } as never)
       ).rejects.toThrow();
     });
@@ -464,6 +507,47 @@ describe('ContactLogService', () => {
         expect(call[1][0].Contact_Date).toBe('2026-05-17 00:00:00');
         expect(call[2]).toEqual({ $userId: 500 });
       }
+    });
+
+    // --- F4: Made_By and Contact_ID are server-authoritative ---------------
+
+    it('F4: strips a caller-supplied Made_By and stamps the gate User_ID', async () => {
+      mockRequireSecurityRole.mockResolvedValueOnce(4242);
+      mockUpdateTableRecords.mockResolvedValueOnce([{ Contact_Log_ID: 1 }]);
+
+      const service = await ContactLogService.getInstance();
+      await service.updateContactLog(1, {
+        Notes: 'Updated note',
+        Made_By: 999,
+      } as never);
+
+      const [, records] = mockUpdateTableRecords.mock.calls[0];
+      expect(records[0].Made_By).toBe(4242);
+      expect(records[0].Made_By).not.toBe(999);
+    });
+
+    it('F4: never sends Contact_ID, so a log cannot be re-parented', async () => {
+      mockUpdateTableRecords.mockResolvedValueOnce([{ Contact_Log_ID: 1 }]);
+
+      const service = await ContactLogService.getInstance();
+      await service.updateContactLog(1, {
+        Notes: 'Updated note',
+        Contact_ID: 999,
+      } as never);
+
+      const [, records] = mockUpdateTableRecords.mock.calls[0];
+      expect(records[0]).not.toHaveProperty('Contact_ID');
+    });
+
+    it('F4: stamps Made_By on an ordinary edit that sends neither field', async () => {
+      mockUpdateTableRecords.mockResolvedValueOnce([{ Contact_Log_ID: 1 }]);
+
+      const service = await ContactLogService.getInstance();
+      await service.updateContactLog(1, { Notes: 'Updated note' });
+
+      const [, records] = mockUpdateTableRecords.mock.calls[0];
+      expect(records[0].Made_By).toBe(500);
+      expect(records[0]).not.toHaveProperty('Contact_ID');
     });
 
     it('throws when API returns empty result', async () => {
@@ -617,7 +701,6 @@ describe('ContactLogService', () => {
         Contact_ID: 42,
         Contact_Date: '2026-05-17',
         Contact_Log_Type_ID: 1,
-        Made_By: 100,
         Notes: sensitiveNotes,
         Planned_Contact_ID: null,
         Contact_Successful: null,

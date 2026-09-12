@@ -7,6 +7,26 @@ import { DomainTimezoneService } from "@/services/domainTimezoneService";
 import { AuthorizationService } from "@/services/authorizationService";
 
 /**
+ * What a caller may supply when creating a contact log.
+ *
+ * `Made_By` is absent by construction: authorship is stamped server-side from
+ * the authorization gate, never accepted from the caller. See F4 in the auth
+ * review and `.claude/references/auth.md` § Authorization.
+ */
+export type ContactLogCreateInput = Omit<ContactLogInput, "Contact_Log_ID" | "Made_By">;
+
+/**
+ * What a caller may supply when updating a contact log.
+ *
+ * Both `Contact_ID` and `Made_By` are absent by construction — a log may not be
+ * re-parented onto a different contact's record, and its authorship is stamped
+ * server-side from the authorization gate (F4).
+ */
+export type ContactLogUpdateInput = Partial<
+  Omit<ContactLogInput, "Contact_Log_ID" | "Contact_ID" | "Made_By">
+>;
+
+/**
  * ContactLogService - Singleton service for managing contact log operations
  * 
  * This service provides methods to interact with contact log data from Ministry Platform,
@@ -168,27 +188,44 @@ export class ContactLogService {
    * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async createContactLog(
-    contactLogData: Omit<ContactLogInput, 'Contact_Log_ID'>,
+    contactLogData: ContactLogCreateInput,
   ): Promise<ContactLog> {
-    // Validate non-date fields with the generated schema; Contact_Date is
-    // handled separately by DomainTimezoneService since the generated schema
-    // expects ISO and MP needs SQL wall-clock in the domain time zone.
-    const { Contact_Date, ...rest } = contactLogData;
-    const validatedRest = ContactLogSchema
-      .omit({ Contact_Log_ID: true, Contact_Date: true })
-      .parse(rest);
-
-    const tz = DomainTimezoneService.getInstance();
-    const mpDate = await tz.toMpSqlDatetime(Contact_Date);
-
+    // Gate first. Its return value is the ONLY source of `Made_By` — nothing a
+    // caller sends can become the author of a pastoral record (F4).
     const $userId = await AuthorizationService.getInstance().requireSecurityRole({
       table: "Contact_Log",
       operation: "create",
     });
 
+    // Validate non-date fields with the generated schema; Contact_Date is
+    // handled separately by DomainTimezoneService since the generated schema
+    // expects ISO and MP needs SQL wall-clock in the domain time zone.
+    //
+    // `Made_By` is omitted from the schema too, and a Zod object parse strips
+    // keys it does not declare, so a smuggled `Made_By` is dropped here rather
+    // than merely untyped. TypeScript is erased at runtime and this payload
+    // arrives over a server action POST, so the type alone guards nothing.
+    const { Contact_Date, ...rest } = contactLogData;
+    const validatedRest = ContactLogSchema
+      .omit({ Contact_Log_ID: true, Contact_Date: true, Made_By: true })
+      .parse(rest);
+
+    // The subject contact legitimately comes from the caller (it is the record
+    // being viewed), so it is validated as a positive integer ID, not trusted.
+    const contactId = sanitizeNumericId(validatedRest.Contact_ID, "Contact ID");
+
+    const tz = DomainTimezoneService.getInstance();
+    const mpDate = await tz.toMpSqlDatetime(Contact_Date);
+
     const result = await this.mp!.createTableRecords(
       "Contact_Log",
-      [{ ...validatedRest, Contact_Date: mpDate }],
+      [{
+        ...validatedRest,
+        Contact_ID: contactId,
+        Contact_Date: mpDate,
+        // Last, so no spread above can override server-stamped attribution.
+        Made_By: $userId,
+      }],
       { $userId }
     );
 
@@ -209,11 +246,27 @@ export class ContactLogService {
    */
   public async updateContactLog(
     contactLogId: number,
-    contactLogData: Partial<Omit<ContactLogInput, 'Contact_Log_ID'>>
+    contactLogData: ContactLogUpdateInput
   ): Promise<ContactLog> {
+    // Gate first. Its return value is the ONLY source of `Made_By` (F4).
+    const $userId = await AuthorizationService.getInstance().requireSecurityRole({
+      table: "Contact_Log",
+      operation: "update",
+    });
+
+    // `Contact_ID` and `Made_By` are omitted from the schema, and a Zod object
+    // parse strips keys it does not declare, so both are dropped from whatever
+    // the caller sent (F4). `Contact_ID` is then never included in the PUT at
+    // all, so MP preserves the contact the log was created against — a log
+    // cannot be moved onto someone else's record.
     const { Contact_Date, ...rest } = contactLogData;
     const validatedRest = ContactLogSchema
-      .omit({ Contact_Log_ID: true, Contact_Date: true })
+      .omit({
+        Contact_Log_ID: true,
+        Contact_Date: true,
+        Contact_ID: true,
+        Made_By: true,
+      })
       .partial()
       .parse(rest);
 
@@ -227,12 +280,9 @@ export class ContactLogService {
       Contact_Log_ID: contactLogId,
       ...validatedRest,
       ...(mpDate !== undefined ? { Contact_Date: mpDate } : {}),
+      // Last, so no spread above can override server-stamped attribution.
+      Made_By: $userId,
     };
-
-    const $userId = await AuthorizationService.getInstance().requireSecurityRole({
-      table: "Contact_Log",
-      operation: "update",
-    });
 
     const result = await this.mp!.updateTableRecords(
       "Contact_Log",
