@@ -313,20 +313,24 @@ describe('Auth - OAuth Configuration', () => {
   });
 
   /**
-   * Regression guard for the better-auth 1.7 account-identity change.
+   * Regression guard for the better-auth 1.7 account-identity churn.
    *
-   * 1.7 keys accounts on (issuer, accountId) and refuses to initialize a
-   * discovery provider whose issuer it cannot resolve — a failed discovery
-   * fetch throws straight out of `betterAuth()`. An explicit `accountIssuer`
-   * pins the namespace so a transient MP outage cannot silently re-key existing
-   * accounts, and keeps this module importable without network access.
+   * 1.7.0–1.7.2 keyed accounts on (issuer, accountId) and refused to initialize
+   * a discovery provider whose issuer it could not resolve, which is why this
+   * config used to set an explicit `accountIssuer`. 1.7.3 reverted that:
+   * accounts are identified by (providerId, accountId) as in 1.6 (#11153), and
+   * a discovery failure no longer takes down the auth API (#10978).
+   *
+   * That makes `providerId` the whole stable half of the account key again — if
+   * it ever drifts, every existing user silently becomes a new account. Assert
+   * it stays pinned, and that the removed issuer option has not crept back in
+   * (it would now be silently ignored rather than rejected at runtime).
    */
-  it('pins the account issuer explicitly (better-auth 1.7 guard)', () => {
+  it('keys accounts on a stable providerId, with no issuer pinning', () => {
     const config = getMpProviderConfig();
 
-    expect(config.accountIssuer).toBe(
-      `${process.env.MINISTRY_PLATFORM_BASE_URL}/oauth`,
-    );
+    expect(config.providerId).toBe('ministry-platform');
+    expect(config).not.toHaveProperty('accountIssuer');
   });
 
   /**

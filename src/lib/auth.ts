@@ -154,15 +154,15 @@ const options = {
         {
           providerId: "ministry-platform",
           discoveryUrl: `${mpBaseUrl}/oauth/.well-known/openid-configuration`,
-          // better-auth 1.7 keys accounts on (issuer, accountId) and REFUSES to
-          // initialize a discovery provider whose issuer it cannot pin down —
-          // a failed discovery fetch throws out of `betterAuth()` rather than
-          // degrading silently as it did in 1.6. Declaring the issuer keeps
-          // the account namespace stable (and the module importable without
-          // network access, e.g. in tests/CI). MP's discovery document reports
-          // exactly this value; discovery still supplies the endpoints and the
-          // JWKS used to verify ID tokens.
-          accountIssuer: `${mpBaseUrl}/oauth`,
+          // No issuer pinning here, deliberately. better-auth 1.7.0–1.7.2 keyed
+          // accounts on (issuer, accountId) and refused to initialize a discovery
+          // provider whose issuer it could not resolve, so this config carried an
+          // explicit `accountIssuer`. 1.7.3 reverted both halves: accounts are
+          // identified by (providerId, accountId) again as in 1.6 (#11153), and a
+          // discovery failure no longer takes down the auth API (#10978). The
+          // option was removed along with that revert, so setting it is now a
+          // type error. Discovery still supplies the endpoints and the JWKS used
+          // to verify ID tokens.
           clientId: process.env.OIDC_CLIENT_ID!,
           clientSecret: process.env.OIDC_CLIENT_SECRET!,
           scopes: [

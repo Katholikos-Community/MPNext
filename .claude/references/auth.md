@@ -71,7 +71,6 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 |---------|-------|-------|
 | `providerId` | `"ministry-platform"` | Used in OAuth URLs and `signIn.social({ provider })` |
 | `discoveryUrl` | `${MP_BASE_URL}/oauth/.well-known/openid-configuration` | OIDC auto-discovery |
-| `accountIssuer` | `${MP_BASE_URL}/oauth` | Pins the account-identity namespace (see 1.7 notes below) |
 | `scopes` | `openid`, `offline_access`, `dataplatform/scopes/all` | Full MP API access |
 | `pkce` | `false` | Explicitly disabled — 1.7 defaults this to `true` (see 1.7 notes below) |
 | `getUserInfo` | Custom callback | Fetches OIDC userinfo, returns `sub: profile.sub` |
@@ -88,7 +87,7 @@ way it does:
 | `signIn.oauth2()` removed | `src/app/signin/page.tsx` calls `authClient.signIn.social({ provider: "ministry-platform" })` |
 | `genericOAuthClient()` dropped | Removed from `src/lib/auth-client.ts`; only `customSessionClient` remains |
 | **Callback path moved** | `/api/auth/oauth2/callback/ministry-platform` → **`/api/auth/callback/ministry-platform`**. This URL must be registered as a redirect URI on the MP OAuth client (`OIDC_CLIENT_ID`) for every environment. |
-| Account identity keyed on `(issuer, accountId)` | `accountIssuer` is set explicitly (see below) |
+| Account identity keyed on `(issuer, accountId)` | **Reverted in 1.7.3** — back to `(providerId, accountId)`, and `accountIssuer` was removed. See [Version Notes](#173--account-identity-reverted-breaking). |
 | Account subject no longer falls back to `id` | `getUserInfo` returns `sub` (see below) |
 | `pkce` defaults to `true` | Kept explicitly `false`; MP discovery *does* advertise `S256`, so this is a candidate follow-up |
 | ID tokens verified against provider JWKS | Automatic — MP publishes `jwks_uri`; also enables `nonce` binding |
@@ -101,13 +100,13 @@ way it does:
 > subject to `""` and breaks account identity for every user. `src/auth.test.ts`
 > guards this by calling the real configured `getUserInfo`.
 
-> ⚠️ **`accountIssuer` must stay set.** 1.7 refuses to initialize a discovery
-> provider whose issuer it cannot pin down — a failed discovery fetch **throws
-> out of `betterAuth()`** instead of degrading silently as it did in 1.6.
-> Declaring the issuer keeps the account namespace stable across a transient MP
-> outage and keeps `src/lib/auth.ts` importable without network access (tests,
-> CI). Discovery still supplies the endpoints and the JWKS used to verify ID
-> tokens.
+> ⚠️ **`accountIssuer` is gone — do not re-add it.** The advice above held only
+> for 1.7.0–1.7.2. **1.7.3 reverted it** (#11153, #10978): accounts are keyed on
+> `(providerId, accountId)` again, a discovery failure no longer throws out of
+> `betterAuth()`, and the option was removed, so setting it is a type error.
+> `providerId` is now the whole stable half of the account key — if it drifts,
+> every existing user silently becomes a new account. Details and the resulting
+> `>= 1.7.3` version floor: [Version Notes](#173--account-identity-reverted-breaking).
 
 > ℹ️ **`nonce` binding is now on.** Because MP publishes a `jwks_uri`, Better
 > Auth sends a server-generated `nonce` and rejects a callback whose `id_token`
@@ -492,13 +491,16 @@ the `better-auth` version, do this before merging:
    `/api/auth/oauth2/callback/:id` → `/api/auth/callback/:id`). A moved callback
    needs the new redirect URI registered on the MP OAuth client in **every**
    environment before deploy — nothing in CI catches this.
-3. **Run the auth tests**: `npm run test:run src/auth.test.ts`. Three tests are
+3. **Run the auth tests**: `npm run test:run src/auth.test.ts`. Four tests are
    real library guards, not simulations:
    - `better-auth 1.6 guard` — `userGuid` still survives provider-profile parsing.
    - `better-auth 1.7 guard` (getUserInfo) — the profile still carries `sub`, which
      the OIDC `accountSubject` resolver reads.
-   - `better-auth 1.7 guard` (accountIssuer) — the issuer is still pinned, so a
-     discovery failure can't throw out of `betterAuth()` or re-key accounts.
+   - account identity — `providerId` stays pinned and no issuer option has crept
+     back in (see 1.7.3 below).
+   - disabled endpoints — `/update-user` and friends still 404. **Never** relax
+     this to make an unrelated failure go away; see
+     [Disabled Endpoints](#disabled-endpoints) for why it is load-bearing.
 4. **Manual smoke test (required — nothing else catches this):**
    - `npm run dev`, sign in through Ministry Platform.
    - Open `/api/auth/get-session` and confirm the session `user` object contains
@@ -512,9 +514,10 @@ the `better-auth` version, do this before merging:
    - `id_token failed verification against the discovery JWKS or expected nonce`
      → MP isn't echoing the `nonce`, or JWKS/audience changed. Escape hatch:
      `disableIdTokenNonceBinding: true` (costs `id_token` replay protection).
-   - `discovery returned no valid data` → MP discovery is unreachable; the pinned
-     `accountIssuer` keeps init from throwing, but sign-in still needs discovery
-     for the endpoints.
+   - `discovery returned no valid data` → MP discovery is unreachable. Since
+     1.7.3 this no longer throws out of `betterAuth()` (#10978), so the app still
+     boots — but sign-in stays broken until discovery returns, because the
+     endpoints and JWKS come from it.
 6. If `userGuid` is missing, check `parseAdditionalUserInputFromProviderProfile`
    in `node_modules/better-auth/dist/db/schema.mjs` — the library may have changed
    how additional fields flow from the OAuth profile into the user record.
@@ -526,3 +529,53 @@ the `better-auth` version, do this before merging:
 3. **userGuid type cast**: `session.user.userGuid` requires a type cast because `customSessionClient` doesn't infer `additionalFields` from `genericOAuth`. This is a Better Auth type limitation.
 4. **Token refresh**: Not explicitly implemented. The `storeAccountCookie` stores refresh tokens, but automatic refresh behavior in stateless mode is unverified.
 5. **Cookie cache staleness**: The 1-hour JWT cookie cache means `customSession` changes won't take effect until the cache expires or the user re-authenticates.
+
+## Version Notes
+
+### 1.7.3 — account identity reverted (breaking)
+
+1.7.0–1.7.2 keyed accounts on `(issuer, accountId)` and refused to initialize a
+discovery provider whose issuer it could not resolve, so this config carried an
+explicit `accountIssuer`. **1.7.3 reverted both halves**: accounts are identified
+by `(providerId, accountId)` again as in 1.6 (#11153), and a discovery failure no
+longer takes down the auth API (#10978). The option was **removed**, so setting
+it is now a type error — `accountIssuer` was dropped from `src/lib/auth.ts` when
+we moved to 1.7.4.
+
+Consequence: `providerId` is now the whole stable half of the account key. If it
+ever drifts, every existing user silently becomes a new account. `src/auth.test.ts`
+asserts it stays pinned.
+
+Because our config no longer sets an issuer, **`better-auth` must stay `>= 1.7.3`**
+(`package.json` floors at `^1.7.4`). Resolving to 1.7.0–1.7.2 would reintroduce the
+issuer requirement with nothing satisfying it.
+
+### 1.7.3 — schema validation on init (inert here)
+
+1.7.3 enabled adapter schema validation by default, rejecting auth requests on a
+detected mismatch. **This is inert in this app**: the check is attached per-adapter
+via `registerSchemaCheck`, which nothing registers for our no-database setup, so
+`ctx.checkSchema` is `undefined` and the per-request check is a no-op. It can be
+disabled outright with `advanced.database.validateSchema: false` if a persistent
+adapter is ever added and its schema legitimately differs.
+
+### 1.7.4
+
+No changes affecting this config (OpenTelemetry opt-out, Expo/Metro and Drizzle
+fixes, `testUtils` additions). Verified against the release notes, not assumed.
+
+## Incident Response — forged sessions outlive the patch
+
+If a session was tampered with via `/update-user` **before** it was disabled, the
+forged `userGuid` lives in that user's **JWT cookie cache for up to 1 hour**
+(`session.cookieCache.maxAge`). Closing the endpoint stops new forgeries; it does
+**not** revoke one already minted into a cookie. After deploying that fix:
+
+- Treat the hour following deploy as still-exposed for any session already forged.
+- Forcing sign-out is the only immediate revocation. With no database there is no
+  server-side session store to clear, so the practical lever is rotating
+  `BETTER_AUTH_SECRET`, which invalidates **every** session cookie at once (all
+  users must sign in again).
+- `dp_Audit_Log` is the record of what a forged session did: writes carry the
+  impersonated user's `User_ID`, so attribution during the exposure window cannot
+  be trusted on its face.
