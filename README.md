@@ -14,8 +14,36 @@
 
 A modern Next.js application integrated with Ministry Platform authentication and REST API, built with TypeScript, Next.js 16, React 19, and Better Auth.
 
+## Security Notice
+
+> ### ⚠️ Forks must merge a session-identity fix (2026-09-12)
+>
+> A **High** severity vulnerability (CVSS 8.1) let any *authenticated* user reassign
+> their session to another user's Ministry Platform identity — inheriting that
+> user's roles and groups, and forging their attribution in `dp_Audit_Log`.
+> Fixed in [`436466d`](https://github.com/MinistryPlatform-Community/MPNext/commit/436466d).
+>
+> **The usual advice is inverted here.** MPNext is forked and copied, not
+> installed, so the affected set is a commit range and nothing will alert you
+> automatically:
+>
+> - **Affected** — your fork contains [`c9d80d4`](https://github.com/MinistryPlatform-Community/MPNext/commit/c9d80d4) (2026-07-09) but not `436466d`.
+> - **Not affected** — your fork predates `c9d80d4`. Do **not** "update to latest"
+>   reflexively; merging past `c9d80d4` without the fix would *introduce* the flaw.
+>
+> ```bash
+> git merge-base --is-ancestor c9d80d4 HEAD && echo "has the flaw"
+> git merge-base --is-ancestor 436466d HEAD && echo "has the fix"
+> ```
+>
+> Patching does **not** revoke sessions already forged — they survive in the JWT
+> cookie cache for up to an hour. See the
+> **[full advisory](docs/security/2026-09-12-session-identity.md)** for
+> verification steps, incident response, and `dp_Audit_Log` guidance.
+
 ## Table of Contents
 
+- [Security Notice](#security-notice)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
