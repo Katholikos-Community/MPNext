@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockGetUserProfile, mockGetSession } = vi.hoisted(() => ({
+const { mockGetUserProfile, mockGetSession, mockHasSecurityRole } = vi.hoisted(() => ({
   mockGetUserProfile: vi.fn(),
   mockGetSession: vi.fn(),
+  mockHasSecurityRole: vi.fn(),
 }));
 
 vi.mock('@/lib/auth', () => ({
@@ -21,6 +22,14 @@ vi.mock('@/services/userService', () => ({
   UserService: {
     getInstance: vi.fn().mockResolvedValue({
       getUserProfile: mockGetUserProfile,
+    }),
+  },
+}));
+
+vi.mock('@/services/authorizationService', () => ({
+  AuthorizationService: {
+    getInstance: () => ({
+      hasSecurityRole: mockHasSecurityRole,
     }),
   },
 }));
@@ -48,6 +57,9 @@ const mockProfile = {
 describe('getCurrentUserProfile', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: a role-holder. The profile load itself never depends on this —
+    // any MP user may sign in and see the app shell.
+    mockHasSecurityRole.mockResolvedValue({ permitted: true, userId: 1, reason: null });
   });
 
   it('should require authentication', async () => {
@@ -78,7 +90,7 @@ describe('getCurrentUserProfile', () => {
     const result = await getCurrentUserProfile();
 
     expect(mockGetUserProfile).toHaveBeenCalledWith('guid-123');
-    expect(result).toEqual(mockProfile);
+    expect(result).toEqual({ ...mockProfile, canAccessContactFeatures: true });
   });
 
   it('should ignore any caller-supplied GUID and use the session GUID', async () => {
@@ -107,5 +119,84 @@ describe('getCurrentUserProfile', () => {
     mockGetUserProfile.mockRejectedValueOnce(new Error('Service error'));
 
     await expect(getCurrentUserProfile()).rejects.toThrow('Service error');
+  });
+
+  /**
+   * `canAccessContactFeatures` is what the sidebar and the dashboard tile read
+   * to decide whether to render a link into the contact features. It is UX
+   * only — every gated layer re-checks — but it must be computed SERVER-SIDE
+   * from the same gate, never derived on the client from `roles`, or the nav
+   * and the enforcement can drift apart.
+   */
+  describe('canAccessContactFeatures', () => {
+    it('is true when the gate permits the user', async () => {
+      mockGetSession.mockResolvedValueOnce(mockAuthSession);
+      mockGetUserProfile.mockResolvedValueOnce(mockProfile);
+      mockHasSecurityRole.mockResolvedValueOnce({
+        permitted: true,
+        userId: 1,
+        reason: null,
+      });
+
+      const result = await getCurrentUserProfile();
+
+      expect(result?.canAccessContactFeatures).toBe(true);
+      expect(mockHasSecurityRole).toHaveBeenCalledWith({
+        table: 'Contacts',
+        operation: 'read',
+      });
+    });
+
+    it('is false for a signed-in user holding no security role', async () => {
+      mockGetSession.mockResolvedValueOnce(mockAuthSession);
+      mockGetUserProfile.mockResolvedValueOnce({ ...mockProfile, roles: [] });
+      mockHasSecurityRole.mockResolvedValueOnce({
+        permitted: false,
+        userId: 1,
+        reason: 'no_security_role',
+      });
+
+      const result = await getCurrentUserProfile();
+
+      expect(result?.canAccessContactFeatures).toBe(false);
+    });
+
+    it('still returns the profile for a role-less user — they keep the app shell', async () => {
+      // POLICY: any MP user may sign in. A role-less session must still load
+      // its own profile, or the header avatar and the sign-out menu vanish.
+      mockGetSession.mockResolvedValueOnce(mockAuthSession);
+      mockGetUserProfile.mockResolvedValueOnce({ ...mockProfile, roles: [] });
+      mockHasSecurityRole.mockResolvedValueOnce({
+        permitted: false,
+        userId: 1,
+        reason: 'no_security_role',
+      });
+
+      const result = await getCurrentUserProfile();
+
+      expect(result).toMatchObject({ User_ID: 1, First_Name: 'John' });
+    });
+
+    it('uses the non-throwing gate so a refusal never breaks the shell', async () => {
+      mockGetSession.mockResolvedValueOnce(mockAuthSession);
+      mockGetUserProfile.mockResolvedValueOnce(mockProfile);
+      mockHasSecurityRole.mockResolvedValueOnce({
+        permitted: false,
+        userId: null,
+        reason: 'no_mp_user',
+      });
+
+      await expect(getCurrentUserProfile()).resolves.toMatchObject({
+        canAccessContactFeatures: false,
+      });
+    });
+
+    it('does not consult the gate when MP has no matching user', async () => {
+      mockGetSession.mockResolvedValueOnce(mockAuthSession);
+      mockGetUserProfile.mockResolvedValueOnce(undefined);
+
+      await expect(getCurrentUserProfile()).resolves.toBeUndefined();
+      expect(mockHasSecurityRole).not.toHaveBeenCalled();
+    });
   });
 });

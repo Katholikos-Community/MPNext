@@ -6,14 +6,14 @@ const {
   mockUpdateTableRecords,
   mockDeleteTableRecords,
   mockGetDomainInfo,
-  mockGetActingUserIdForWrite,
+  mockRequireSecurityRole,
 } = vi.hoisted(() => ({
   mockGetTableRecords: vi.fn(),
   mockCreateTableRecords: vi.fn(),
   mockUpdateTableRecords: vi.fn(),
   mockDeleteTableRecords: vi.fn(),
   mockGetDomainInfo: vi.fn(),
-  mockGetActingUserIdForWrite: vi.fn(),
+  mockRequireSecurityRole: vi.fn(),
 }));
 
 vi.mock('@/lib/providers/ministry-platform', () => {
@@ -28,16 +28,26 @@ vi.mock('@/lib/providers/ministry-platform', () => {
   };
 });
 
-vi.mock('@/services/sessionContextService', () => ({
-  SessionContextService: {
-    getInstance: () => ({
-      getActingUserIdForWrite: mockGetActingUserIdForWrite,
-    }),
-  },
-}));
+vi.mock('@/services/authorizationService', () => {
+  class UnauthorizedError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'UnauthorizedError';
+    }
+  }
+  return {
+    UnauthorizedError,
+    AuthorizationService: {
+      getInstance: () => ({
+        requireSecurityRole: mockRequireSecurityRole,
+      }),
+    },
+  };
+});
 
 import { ContactLogService } from '@/services/contactLogService';
 import { DomainTimezoneService } from '@/services/domainTimezoneService';
+import { UnauthorizedError } from '@/services/authorizationService';
 
 describe('ContactLogService', () => {
   beforeEach(() => {
@@ -46,8 +56,9 @@ describe('ContactLogService', () => {
     mockUpdateTableRecords.mockReset();
     mockDeleteTableRecords.mockReset();
     mockGetDomainInfo.mockReset();
-    mockGetActingUserIdForWrite.mockReset();
-    mockGetActingUserIdForWrite.mockResolvedValue(500);
+    mockRequireSecurityRole.mockReset();
+    // Default: an authorized role-holder with MP User_ID 500.
+    mockRequireSecurityRole.mockResolvedValue(500);
     mockGetDomainInfo.mockResolvedValue({
       TimeZoneName: 'America/New_York',
       DisplayName: 'Test',
@@ -180,6 +191,51 @@ describe('ContactLogService', () => {
     });
   });
 
+  /**
+   * F1 (2026-09-12). These reads used to be gated on nothing but an
+   * authenticated session, at the action layer only. Contact logs are pastoral
+   * records and MP data comes back through this app's client-credentials
+   * service account, so the service re-checks: a caller that bypasses the
+   * actions must still be refused.
+   */
+  describe('read authorization', () => {
+    it.each([
+      ['getContactLogTypes', 'Contact_Log_Types', (s: ContactLogService) => s.getContactLogTypes()],
+      ['searchContactLogs', 'Contact_Log', (s: ContactLogService) => s.searchContactLogs(42)],
+      ['getContactLogById', 'Contact_Log', (s: ContactLogService) => s.getContactLogById(1)],
+      [
+        'getContactLogsByContactId',
+        'Contact_Log',
+        (s: ContactLogService) => s.getContactLogsByContactId(42),
+      ],
+    ])('%s gates on a security role for a read of %s', async (_name, table, call) => {
+      mockGetTableRecords.mockResolvedValueOnce([]);
+
+      const service = await ContactLogService.getInstance();
+      await call(service);
+
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({ table, operation: 'read' });
+    });
+
+    it.each([
+      ['getContactLogTypes', (s: ContactLogService) => s.getContactLogTypes()],
+      ['searchContactLogs', (s: ContactLogService) => s.searchContactLogs(42)],
+      ['getContactLogById', (s: ContactLogService) => s.getContactLogById(1)],
+      [
+        'getContactLogsByContactId',
+        (s: ContactLogService) => s.getContactLogsByContactId(42),
+      ],
+    ])('%s reads nothing when the caller holds no security role', async (_name, call) => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required'),
+      );
+
+      const service = await ContactLogService.getInstance();
+      await expect(call(service)).rejects.toThrow(UnauthorizedError);
+      expect(mockGetTableRecords).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createContactLog', () => {
     it('passes a date-only Contact_Date through as MP-TZ midnight (no UTC shift)', async () => {
       const mockCreated = { Contact_Log_ID: 1, Contact_ID: 42 };
@@ -210,15 +266,38 @@ describe('ContactLogService', () => {
         ],
         { $userId: 500 },
       );
-      expect(mockGetActingUserIdForWrite).toHaveBeenCalledWith({
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
         table: 'Contact_Log',
         operation: 'create',
       });
       expect(result).toEqual(mockCreated);
     });
 
-    it('omits $userId param when SessionContextService resolves to null (anonymous write)', async () => {
-      mockGetActingUserIdForWrite.mockResolvedValueOnce(null);
+    it('does NOT create when the gate refuses (no MP user or no security role)', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required'),
+      );
+
+      const service = await ContactLogService.getInstance();
+      await expect(
+        service.createContactLog({
+          Contact_ID: 42,
+          Contact_Date: '2026-05-17',
+          Contact_Log_Type_ID: 1,
+          Made_By: 100,
+          Notes: 'Test note',
+          Planned_Contact_ID: null,
+          Contact_Successful: null,
+          Original_Contact_Log_Entry: null,
+          Feedback_Entry_ID: null,
+        }),
+      ).rejects.toThrow(UnauthorizedError);
+
+      expect(mockCreateTableRecords).not.toHaveBeenCalled();
+    });
+
+    it('stamps $userId with the User_ID the gate returned', async () => {
+      mockRequireSecurityRole.mockResolvedValueOnce(4242);
       mockCreateTableRecords.mockResolvedValueOnce([{ Contact_Log_ID: 1 }]);
 
       const service = await ContactLogService.getInstance();
@@ -237,7 +316,7 @@ describe('ContactLogService', () => {
       expect(mockCreateTableRecords).toHaveBeenCalledWith(
         'Contact_Log',
         expect.any(Array),
-        undefined,
+        { $userId: 4242 },
       );
     });
 
@@ -317,7 +396,7 @@ describe('ContactLogService', () => {
         ],
         { $userId: 500 },
       );
-      expect(mockGetActingUserIdForWrite).toHaveBeenCalledWith({
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
         table: 'Contact_Log',
         operation: 'update',
       });
@@ -342,17 +421,30 @@ describe('ContactLogService', () => {
       );
     });
 
-    it('omits $userId param when SessionContextService resolves to null (anonymous update)', async () => {
-      mockGetActingUserIdForWrite.mockResolvedValueOnce(null);
+    it('does NOT update when the gate refuses (no MP user or no security role)', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required'),
+      );
+
+      const service = await ContactLogService.getInstance();
+      await expect(
+        service.updateContactLog(1, { Notes: 'Anon update' }),
+      ).rejects.toThrow(UnauthorizedError);
+
+      expect(mockUpdateTableRecords).not.toHaveBeenCalled();
+    });
+
+    it('stamps $userId with the User_ID the gate returned', async () => {
+      mockRequireSecurityRole.mockResolvedValueOnce(4242);
       mockUpdateTableRecords.mockResolvedValueOnce([{ Contact_Log_ID: 1 }]);
 
       const service = await ContactLogService.getInstance();
-      await service.updateContactLog(1, { Notes: 'Anon update' });
+      await service.updateContactLog(1, { Notes: 'Updated note' });
 
       expect(mockUpdateTableRecords).toHaveBeenCalledWith(
         'Contact_Log',
         expect.any(Array),
-        undefined,
+        { $userId: 4242 },
       );
     });
 
@@ -396,24 +488,21 @@ describe('ContactLogService', () => {
         [42],
         { $userId: 500 },
       );
-      expect(mockGetActingUserIdForWrite).toHaveBeenCalledWith({
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
         table: 'Contact_Log',
         operation: 'delete',
       });
     });
 
-    it('omits $userId param when SessionContextService resolves to null (anonymous delete)', async () => {
-      mockGetActingUserIdForWrite.mockResolvedValueOnce(null);
-      mockDeleteTableRecords.mockResolvedValueOnce(undefined);
+    it('does NOT delete when the gate refuses (no MP user or no security role)', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(
+        new UnauthorizedError('Not authorized: an MP security role is required'),
+      );
 
       const service = await ContactLogService.getInstance();
-      await service.deleteContactLog(42);
+      await expect(service.deleteContactLog(42)).rejects.toThrow(UnauthorizedError);
 
-      expect(mockDeleteTableRecords).toHaveBeenCalledWith(
-        'Contact_Log',
-        [42],
-        undefined,
-      );
+      expect(mockDeleteTableRecords).not.toHaveBeenCalled();
     });
 
     it('should propagate delete errors', async () => {

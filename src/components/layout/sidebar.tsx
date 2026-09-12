@@ -2,20 +2,44 @@
 
 import { XMarkIcon } from "@heroicons/react/24/outline";
 import { HomeIcon, UsersIcon } from "@heroicons/react/24/outline";
+import { useUser } from "@/contexts";
 
 interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-const navigation = [
+/**
+ * Nav entries that every signed-in user gets. Any MP user may sign in, so the
+ * dashboard is always reachable.
+ */
+const baseNavigation = [
   { name: "Dashboard", href: "/", icon: HomeIcon },
-  { name: "Contact Lookup", href: "/contactlookup", icon: UsersIcon },
   // { name: 'Calendar', href: '/calendar', icon: CalendarIcon },
   // { name: 'Settings', href: '/settings', icon: CogIcon },
 ];
 
+/** Nav entries gated on contact-feature access. */
+const contactNavigation = [
+  { name: "Contact Lookup", href: "/contactlookup", icon: UsersIcon },
+];
+
 export function Sidebar({ isOpen, onClose }: SidebarProps) {
+  const { userProfile } = useUser();
+
+  // UX ONLY — this is not a security control. `canAccessContactFeatures` is
+  // computed server-side by `getCurrentUserProfile` from the same
+  // AuthorizationService gate that the /contactlookup layout, the server
+  // actions and the services all enforce with. Hiding the link keeps a
+  // role-less user from being handed navigation that would only refuse them;
+  // typing the URL still lands on the real gate. `=== true` so a missing or
+  // not-yet-loaded profile fails closed.
+  const canAccessContactFeatures = userProfile?.canAccessContactFeatures === true;
+
+  const navigation = canAccessContactFeatures
+    ? [...baseNavigation, ...contactNavigation]
+    : baseNavigation;
+
   return (
     <div
       className={`fixed top-0 left-0 z-50 h-full w-64 bg-[#344767] shadow-lg transform transition-transform duration-300 ease-in-out ${

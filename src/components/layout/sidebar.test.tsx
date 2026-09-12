@@ -1,30 +1,76 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import type { MPUserProfile } from "@/lib/providers/ministry-platform/types";
 
 /**
  * Sidebar navigation tests.
  *
  * The Sidebar is the app's only navigation surface, and it is rendered
  * unconditionally by the Header — it is always in the DOM, and `isOpen` only
- * slides it in or out. That design has two regression risks these tests guard:
+ * slides it in or out. That design has three regression risks these tests
+ * guard:
  *
- * 1. The nav list is a module-level constant. If a route is renamed in the app
- *    router but not here (or an entry is accidentally dropped while
+ * 1. The nav list is built from module-level constants. If a route is renamed
+ *    in the app router but not here (or an entry is accidentally dropped while
  *    uncommenting one of the placeholder items), the link silently 404s. The
  *    first test pins both the visible labels and their hrefs.
  * 2. Because the panel is always mounted, `onClose` is the only thing that
  *    dismisses it. A missing handler on either the X button or a nav link
  *    leaves the drawer covering the page after navigation, so both paths are
  *    asserted separately.
+ * 3. The Contact Lookup entry is conditional on `canAccessContactFeatures`
+ *    (2026-09-12, F1). This is UX ONLY — the /contactlookup layout, the server
+ *    actions and the services each enforce independently — so the tests below
+ *    say "hidden", never "protected". What they do pin is that the decision is
+ *    read from the SERVER-COMPUTED flag and not re-derived on the client from
+ *    `roles`, and that it fails closed when the profile is absent.
+ *
+ * `@/contexts` is mocked: the real UserProvider calls a server action that
+ * reaches Ministry Platform, and nothing in this file may touch MP.
  *
  * Note: this component takes no route input and has no active-link state, so
  * there is no "current page" highlight to test. Open/closed is expressed purely
  * as a transform class, which is why that one assertion looks at className.
  */
 
+const { mockUseUser } = vi.hoisted(() => ({
+  mockUseUser: vi.fn(),
+}));
+
+vi.mock("@/contexts", () => ({
+  useUser: mockUseUser,
+}));
+
 import { Sidebar } from "./sidebar";
 
+const baseProfile: MPUserProfile = {
+  User_ID: 7,
+  User_GUID: "ab12cd34-ef56-7890-abcd-ef1234567890",
+  Contact_ID: 42,
+  First_Name: "Sam",
+  Nickname: "Sam",
+  Last_Name: "Ortiz",
+  Email_Address: "sam@example.com",
+  Mobile_Phone: null,
+  Image_GUID: null,
+  roles: [],
+  userGroups: [],
+};
+
+/** Stubs `useUser()` with a profile carrying the given access flag. */
+function withAccess(canAccessContactFeatures: boolean | undefined) {
+  mockUseUser.mockReturnValue({
+    userProfile: { ...baseProfile, canAccessContactFeatures },
+    refreshUserProfile: vi.fn(),
+  });
+}
+
 describe("Sidebar", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    withAccess(true);
+  });
+
   it("renders every navigation item with its route", () => {
     render(<Sidebar isOpen onClose={() => {}} />);
 
@@ -79,5 +125,70 @@ describe("Sidebar", () => {
     rerender(<Sidebar isOpen onClose={() => {}} />);
     expect(panel.className).toContain("translate-x-0");
     expect(panel.className).not.toContain("-translate-x-full");
+  });
+
+  /**
+   * UX layer of the F1 fix. Not a security control — see the file header.
+   */
+  describe("Contact Lookup visibility", () => {
+    it("shows the entry when the server says the user may use the feature", () => {
+      withAccess(true);
+      render(<Sidebar isOpen onClose={() => {}} />);
+
+      expect(
+        screen.getByRole("link", { name: "Contact Lookup" })
+      ).toBeInTheDocument();
+    });
+
+    it("hides the entry for a signed-in user without access", () => {
+      withAccess(false);
+      render(<Sidebar isOpen onClose={() => {}} />);
+
+      expect(screen.queryByRole("link", { name: "Contact Lookup" })).toBeNull();
+    });
+
+    it("still shows the Dashboard to a user without access", () => {
+      // Any MP user may sign in and use the app shell; only the contact
+      // features are gated. A role-less user must not get an empty menu.
+      withAccess(false);
+      render(<Sidebar isOpen onClose={() => {}} />);
+
+      const links = screen.getAllByRole("link");
+      expect(links.map((l) => [l.textContent, l.getAttribute("href")])).toEqual([
+        ["Dashboard", "/"],
+      ]);
+    });
+
+    it("hides the entry when the flag is absent (fails closed)", () => {
+      withAccess(undefined);
+      render(<Sidebar isOpen onClose={() => {}} />);
+
+      expect(screen.queryByRole("link", { name: "Contact Lookup" })).toBeNull();
+    });
+
+    it("hides the entry while the profile is still null", () => {
+      mockUseUser.mockReturnValue({ userProfile: null, refreshUserProfile: vi.fn() });
+      render(<Sidebar isOpen onClose={() => {}} />);
+
+      expect(screen.queryByRole("link", { name: "Contact Lookup" })).toBeNull();
+      expect(screen.getByRole("link", { name: "Dashboard" })).toBeInTheDocument();
+    });
+
+    it("does not derive access from the role list on the client", () => {
+      // Policy must come from the server-computed flag. A profile carrying
+      // roles but `canAccessContactFeatures: false` (e.g. MP_SECURITY_ROLES
+      // names other roles) must still hide the link.
+      mockUseUser.mockReturnValue({
+        userProfile: {
+          ...baseProfile,
+          roles: ["Administrators", "Pastoral Staff"],
+          canAccessContactFeatures: false,
+        },
+        refreshUserProfile: vi.fn(),
+      });
+      render(<Sidebar isOpen onClose={() => {}} />);
+
+      expect(screen.queryByRole("link", { name: "Contact Lookup" })).toBeNull();
+    });
   });
 });

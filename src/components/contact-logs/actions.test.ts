@@ -4,41 +4,34 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  * Contact-log action tests.
  *
  * These encode the decided authorization policy, not just the code's shape:
- * writes require an authenticated session AND an MP security role; any
- * role-holder may edit or delete a log another user created; reads require
- * authentication only. See `.claude/references/auth.md`.
+ * every action — reads as well as writes — requires an authenticated session
+ * AND an MP security role; any role-holder may read, edit, or delete a log
+ * another user created. See `.claude/references/auth.md`.
+ *
+ * Reads joined the gate on 2026-09-12 (F1). Before that they took a bare
+ * session check, which proved nothing: MP's OIDC endpoint authenticates any
+ * `dp_Users` record and this app reads MP with its own client-credentials
+ * service account, so MP's per-user record security never applied to what came
+ * back. There is no longer a session-only assertion to make here — the gate
+ * subsumes authentication, which is why `mockGetSession` is gone from this file.
  */
 
 const {
-  mockGetSession,
   mockGetContactLogTypes,
   mockCreateContactLog,
   mockUpdateContactLog,
   mockDeleteContactLog,
   mockGetContactLogsByContactId,
   mockGetContactLogById,
-  mockRequireSecurityRoleForWrite,
+  mockRequireSecurityRole,
 } = vi.hoisted(() => ({
-  mockGetSession: vi.fn(),
   mockGetContactLogTypes: vi.fn(),
   mockCreateContactLog: vi.fn(),
   mockUpdateContactLog: vi.fn(),
   mockDeleteContactLog: vi.fn(),
   mockGetContactLogsByContactId: vi.fn(),
   mockGetContactLogById: vi.fn(),
-  mockRequireSecurityRoleForWrite: vi.fn(),
-}));
-
-vi.mock('@/lib/auth', () => ({
-  auth: {
-    api: {
-      getSession: mockGetSession,
-    },
-  },
-}));
-
-vi.mock('next/headers', () => ({
-  headers: vi.fn().mockResolvedValue(new Headers()),
+  mockRequireSecurityRole: vi.fn(),
 }));
 
 vi.mock('@/services/contactLogService', () => ({
@@ -65,7 +58,7 @@ vi.mock('@/services/authorizationService', () => {
     UnauthorizedError,
     AuthorizationService: {
       getInstance: () => ({
-        requireSecurityRoleForWrite: mockRequireSecurityRoleForWrite,
+        requireSecurityRole: mockRequireSecurityRole,
       }),
     },
   };
@@ -81,11 +74,19 @@ import {
 } from './actions';
 import { UnauthorizedError } from '@/services/authorizationService';
 
-const validUserGuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+/** The gate's refusal for an MP user holding no security role. */
+function noRole() {
+  return new UnauthorizedError(
+    'Not authorized: an MP security role is required'
+  );
+}
 
-const mockAuthSession = {
-  user: { id: 'internal-id', userGuid: validUserGuid, userId: 99 },
-};
+/** The gate's refusal for a session with no MP user behind it. */
+function noMpUser() {
+  return new UnauthorizedError(
+    'Not authorized: no Ministry Platform user is attached to this session'
+  );
+}
 
 const validCreateInput = {
   Contact_ID: 42,
@@ -102,17 +103,27 @@ describe('contact-logs actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Default: an authorized role-holder. Individual tests override.
-    mockRequireSecurityRoleForWrite.mockResolvedValue(99);
+    mockRequireSecurityRole.mockResolvedValue(99);
   });
 
   describe('getContactLogTypes', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
-      await expect(getContactLogTypes()).rejects.toThrow('Authentication required');
+    it('refuses a caller with no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(noRole());
+
+      await expect(getContactLogTypes()).rejects.toThrow(UnauthorizedError);
+      expect(mockGetContactLogTypes).not.toHaveBeenCalled();
+    });
+
+    it('refuses a session with no Ministry Platform user', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(noMpUser());
+
+      await expect(getContactLogTypes()).rejects.toThrow(
+        /no Ministry Platform user is attached/
+      );
+      expect(mockGetContactLogTypes).not.toHaveBeenCalled();
     });
 
     it('should return types when authenticated', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       const mockTypes = [{ Contact_Log_Type_ID: 1, Contact_Log_Type: 'Email' }];
       mockGetContactLogTypes.mockResolvedValueOnce(mockTypes);
 
@@ -120,32 +131,35 @@ describe('contact-logs actions', () => {
       expect(result).toEqual(mockTypes);
     });
 
-    it('should not require a security role — it is a read', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
+    it('gates the read on a security role (F1 — it used to gate on nothing)', async () => {
       mockGetContactLogTypes.mockResolvedValueOnce([]);
 
       await getContactLogTypes();
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+        table: 'Contact_Log',
+        operation: 'read',
+      });
     });
   });
 
   describe('createContactLog', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
+    it('refuses a session with no Ministry Platform user', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(noMpUser());
+
       await expect(createContactLog(validCreateInput)).rejects.toThrow(
-        'Authentication required'
+        /no Ministry Platform user is attached/
       );
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+      expect(mockCreateContactLog).not.toHaveBeenCalled();
     });
 
     it('should create the log with Made_By taken from the acting session', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       const mockLog = { Contact_Log_ID: 1, Contact_ID: 42 };
       mockCreateContactLog.mockResolvedValueOnce(mockLog);
 
       const result = await createContactLog(validCreateInput);
 
-      expect(mockRequireSecurityRoleForWrite).toHaveBeenCalledWith({
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
         table: 'Contact_Log',
         operation: 'create',
       });
@@ -160,8 +174,6 @@ describe('contact-logs actions', () => {
     });
 
     it('should throw when required fields are missing', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-
       await expect(
         createContactLog({
           ...validCreateInput,
@@ -178,8 +190,6 @@ describe('contact-logs actions', () => {
       ['Contact_Date', { Contact_Date: '' }],
       ['Notes', { Notes: '' }],
     ])('should reject a create missing %s', async (_field, override) => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-
       await expect(
         createContactLog({ ...validCreateInput, ...override })
       ).rejects.toThrow('Required fields are missing');
@@ -187,8 +197,7 @@ describe('contact-logs actions', () => {
     });
 
     it('should not write when the caller holds no security role', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-      mockRequireSecurityRoleForWrite.mockRejectedValueOnce(
+      mockRequireSecurityRole.mockRejectedValueOnce(
         new UnauthorizedError('Not authorized: an MP security role is required')
       );
 
@@ -202,8 +211,7 @@ describe('contact-logs actions', () => {
       // Regression guard for the inline dp_Users lookup this action used to do
       // on every write. Made_By must come from the authorization gate's return
       // value, which reads the session-baked (already cached) User_ID.
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-      mockRequireSecurityRoleForWrite.mockResolvedValueOnce(4242);
+      mockRequireSecurityRole.mockResolvedValueOnce(4242);
       mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
 
       await createContactLog(validCreateInput);
@@ -214,7 +222,6 @@ describe('contact-logs actions', () => {
     });
 
     it('should wrap a non-Error rejection from the service', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockCreateContactLog.mockRejectedValueOnce('boom');
 
       await expect(createContactLog(validCreateInput)).rejects.toThrow(
@@ -224,24 +231,25 @@ describe('contact-logs actions', () => {
   });
 
   describe('updateContactLog', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
+    it('refuses a session with no Ministry Platform user', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(noMpUser());
+
       await expect(updateContactLog(1, { Notes: 'Updated' })).rejects.toThrow(
-        'Authentication required'
+        /no Ministry Platform user is attached/
       );
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+      expect(mockUpdateContactLog).not.toHaveBeenCalled();
     });
 
     it('should throw for invalid contactLogId', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(updateContactLog(0, { Notes: 'Updated' })).rejects.toThrow(
         'Invalid Contact Log ID'
       );
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+      // The gate runs before argument parsing now, so an unauthorized caller
+      // never reaches this check at all — but an authorized one still does.
+      expect(mockUpdateContactLog).not.toHaveBeenCalled();
     });
 
     it('should reject a negative contact log ID', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(updateContactLog(-5, { Notes: 'x' })).rejects.toThrow(
         'Invalid Contact Log ID'
       );
@@ -249,13 +257,12 @@ describe('contact-logs actions', () => {
     });
 
     it('should update the log after the security-role gate passes', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       const mockLog = { Contact_Log_ID: 1, Notes: 'Updated' };
       mockUpdateContactLog.mockResolvedValueOnce(mockLog);
 
       const result = await updateContactLog(1, { Notes: 'Updated' });
 
-      expect(mockRequireSecurityRoleForWrite).toHaveBeenCalledWith({
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
         table: 'Contact_Log',
         operation: 'update',
       });
@@ -267,7 +274,6 @@ describe('contact-logs actions', () => {
       // Made_By records who made the *contact*. Since any role-holder may edit
       // anyone's log, stamping the editor would rewrite the record's authorship.
       // MP's audit trail captures the editor via $userId in ContactLogService.
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockUpdateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
 
       await updateContactLog(1, { Notes: 'Updated' });
@@ -279,8 +285,7 @@ describe('contact-logs actions', () => {
     });
 
     it('should not write when the caller holds no security role', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-      mockRequireSecurityRoleForWrite.mockRejectedValueOnce(
+      mockRequireSecurityRole.mockRejectedValueOnce(
         new UnauthorizedError('Not authorized: an MP security role is required')
       );
 
@@ -293,7 +298,6 @@ describe('contact-logs actions', () => {
     it('should permit editing a log made by a different user', async () => {
       // POLICY: ownership is not a factor. This test exists so a future reader
       // knows the absence of an ownership check was chosen, not overlooked.
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockUpdateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 7, Made_By: 12345 });
 
       await expect(updateContactLog(7, { Notes: 'Corrected typo' })).resolves.toEqual({
@@ -305,7 +309,6 @@ describe('contact-logs actions', () => {
     });
 
     it('should wrap a non-Error rejection from the service', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockUpdateContactLog.mockRejectedValueOnce('boom');
 
       await expect(updateContactLog(1, { Notes: 'x' })).rejects.toThrow(
@@ -315,25 +318,26 @@ describe('contact-logs actions', () => {
   });
 
   describe('deleteContactLog', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
-      await expect(deleteContactLog(1)).rejects.toThrow('Authentication required');
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+    it('refuses a session with no Ministry Platform user', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(noMpUser());
+
+      await expect(deleteContactLog(1)).rejects.toThrow(
+        /no Ministry Platform user is attached/
+      );
+      expect(mockDeleteContactLog).not.toHaveBeenCalled();
     });
 
     it('should throw for invalid contactLogId', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(deleteContactLog(0)).rejects.toThrow('Invalid Contact Log ID');
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+      expect(mockDeleteContactLog).not.toHaveBeenCalled();
     });
 
     it('should delete after the security-role gate passes', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockDeleteContactLog.mockResolvedValueOnce(undefined);
 
       await deleteContactLog(42);
 
-      expect(mockRequireSecurityRoleForWrite).toHaveBeenCalledWith({
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
         table: 'Contact_Log',
         operation: 'delete',
       });
@@ -343,8 +347,7 @@ describe('contact-logs actions', () => {
     it('should NOT delete when the caller holds no security role', async () => {
       // This is the sharpest edge the gate closes: previously any authenticated
       // session could delete any contact log in the domain by ID.
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-      mockRequireSecurityRoleForWrite.mockRejectedValueOnce(
+      mockRequireSecurityRole.mockRejectedValueOnce(
         new UnauthorizedError('Not authorized: an MP security role is required')
       );
 
@@ -356,7 +359,6 @@ describe('contact-logs actions', () => {
 
     it('should permit deleting a log made by a different user', async () => {
       // POLICY: ownership is not a factor — see updateContactLog above.
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockDeleteContactLog.mockResolvedValueOnce(undefined);
 
       await deleteContactLog(7);
@@ -366,7 +368,6 @@ describe('contact-logs actions', () => {
     });
 
     it('should wrap a non-Error rejection from the service', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockDeleteContactLog.mockRejectedValueOnce('boom');
 
       await expect(deleteContactLog(42)).rejects.toThrow('Failed to delete contact log');
@@ -374,30 +375,33 @@ describe('contact-logs actions', () => {
   });
 
   describe('getContactLogsByContactId', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
-      await expect(getContactLogsByContactId(42)).rejects.toThrow('Authentication required');
+    it('refuses a caller with no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(noRole());
+
+      await expect(getContactLogsByContactId(42)).rejects.toThrow(UnauthorizedError);
+      expect(mockGetContactLogsByContactId).not.toHaveBeenCalled();
     });
 
     it('should throw for invalid contactId', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(getContactLogsByContactId(0)).rejects.toThrow(
         'Invalid Contact ID'
       );
     });
 
-    it('should return logs when authenticated, without a role check', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
+    it('returns logs to a role-holder, after the read gate passes', async () => {
       const mockLogs = [{ Contact_Log_ID: 1, Contact_ID: 42 }];
       mockGetContactLogsByContactId.mockResolvedValueOnce(mockLogs);
 
       const result = await getContactLogsByContactId(42);
+
       expect(result).toEqual(mockLogs);
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+        table: 'Contact_Log',
+        operation: 'read',
+      });
     });
 
     it('should wrap a non-Error rejection from the service', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogsByContactId.mockRejectedValueOnce('boom');
 
       await expect(getContactLogsByContactId(42)).rejects.toThrow(
@@ -407,28 +411,31 @@ describe('contact-logs actions', () => {
   });
 
   describe('getContactLogById', () => {
-    it('should require authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
-      await expect(getContactLogById(1)).rejects.toThrow('Authentication required');
+    it('refuses a caller with no security role', async () => {
+      mockRequireSecurityRole.mockRejectedValueOnce(noRole());
+
+      await expect(getContactLogById(1)).rejects.toThrow(UnauthorizedError);
+      expect(mockGetContactLogById).not.toHaveBeenCalled();
     });
 
     it('should throw for invalid contactLogId', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       await expect(getContactLogById(0)).rejects.toThrow('Invalid Contact Log ID');
     });
 
     it('should return log when found', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       const mockLog = { Contact_Log_ID: 1, Notes: 'Test' };
       mockGetContactLogById.mockResolvedValueOnce(mockLog);
 
       const result = await getContactLogById(1);
+
       expect(result).toEqual(mockLog);
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+      expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+        table: 'Contact_Log',
+        operation: 'read',
+      });
     });
 
     it('should return null when not found', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogById.mockResolvedValueOnce(null);
 
       const result = await getContactLogById(999);
@@ -436,37 +443,62 @@ describe('contact-logs actions', () => {
     });
 
     it('should wrap a non-Error rejection from the service', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogById.mockRejectedValueOnce('boom');
 
       await expect(getContactLogById(1)).rejects.toThrow('Failed to fetch contact log');
     });
   });
 
-  describe('Session guards', () => {
-    it('should reject writes for a session with no user id', async () => {
-      mockGetSession.mockResolvedValue({ user: {} });
+  describe('Authorization guards', () => {
+    it('refuses every write for a session with no MP user behind it', async () => {
+      mockRequireSecurityRole.mockRejectedValue(noMpUser());
 
-      await expect(createContactLog(validCreateInput)).rejects.toThrow(
-        'Authentication required'
-      );
-      await expect(updateContactLog(1, { Notes: 'x' })).rejects.toThrow(
-        'Authentication required'
-      );
-      await expect(deleteContactLog(1)).rejects.toThrow('Authentication required');
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
+      await expect(createContactLog(validCreateInput)).rejects.toThrow(UnauthorizedError);
+      await expect(updateContactLog(1, { Notes: 'x' })).rejects.toThrow(UnauthorizedError);
+      await expect(deleteContactLog(1)).rejects.toThrow(UnauthorizedError);
+
+      expect(mockCreateContactLog).not.toHaveBeenCalled();
+      expect(mockUpdateContactLog).not.toHaveBeenCalled();
+      expect(mockDeleteContactLog).not.toHaveBeenCalled();
     });
 
-    it('no longer requires userGuid on the session — the gate uses the resolved userId', async () => {
-      // The old actions threw "User GUID not found in session" here because they
-      // did their own dp_Users lookup. SessionContextService reads the User_ID
-      // that customSession already baked in, so userGuid is not needed.
-      mockGetSession.mockResolvedValueOnce({ user: { id: 'ba-internal-id', userId: 99 } });
-      mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 1 });
+    it('refuses every read for a session with no MP user behind it', async () => {
+      // F1: these three used to succeed for any session at all.
+      mockRequireSecurityRole.mockRejectedValue(noMpUser());
 
-      await expect(createContactLog(validCreateInput)).resolves.toEqual({
-        Contact_Log_ID: 1,
-      });
+      await expect(getContactLogTypes()).rejects.toThrow(UnauthorizedError);
+      await expect(getContactLogsByContactId(42)).rejects.toThrow(UnauthorizedError);
+      await expect(getContactLogById(1)).rejects.toThrow(UnauthorizedError);
+
+      expect(mockGetContactLogTypes).not.toHaveBeenCalled();
+      expect(mockGetContactLogsByContactId).not.toHaveBeenCalled();
+      expect(mockGetContactLogById).not.toHaveBeenCalled();
+    });
+
+    it('every exported action calls the gate — none is reachable on a session alone', async () => {
+      // Guards against a new action (or a restored one) shipping ungated.
+      mockGetContactLogTypes.mockResolvedValue([]);
+      mockGetContactLogsByContactId.mockResolvedValue([]);
+      mockGetContactLogById.mockResolvedValue(null);
+      mockCreateContactLog.mockResolvedValue({ Contact_Log_ID: 1 });
+      mockUpdateContactLog.mockResolvedValue({ Contact_Log_ID: 1 });
+      mockDeleteContactLog.mockResolvedValue(undefined);
+
+      await getContactLogTypes();
+      await getContactLogsByContactId(42);
+      await getContactLogById(1);
+      await createContactLog(validCreateInput);
+      await updateContactLog(1, { Notes: 'x' });
+      await deleteContactLog(1);
+
+      expect(mockRequireSecurityRole.mock.calls.map((c) => c[0])).toEqual([
+        { table: 'Contact_Log', operation: 'read' },
+        { table: 'Contact_Log', operation: 'read' },
+        { table: 'Contact_Log', operation: 'read' },
+        { table: 'Contact_Log', operation: 'create' },
+        { table: 'Contact_Log', operation: 'update' },
+        { table: 'Contact_Log', operation: 'delete' },
+      ]);
     });
   });
 
@@ -480,8 +512,6 @@ describe('contact-logs actions', () => {
     const injectionPayloads = ['1 OR 1=1', '5; DROP', "1' OR '1'='1", '1 --', '', 'abc', '  7  '];
 
     it.each(injectionPayloads)('getContactLogById rejects %j before reaching the service', async (payload) => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-
       await expect(getContactLogById(payload as unknown as number)).rejects.toThrow(
         'Invalid Contact Log ID'
       );
@@ -489,44 +519,38 @@ describe('contact-logs actions', () => {
     });
 
     it.each(injectionPayloads)('getContactLogsByContactId rejects %j before reaching the service', async (payload) => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-
       await expect(getContactLogsByContactId(payload as unknown as number)).rejects.toThrow(
         'Invalid Contact ID'
       );
       expect(mockGetContactLogsByContactId).not.toHaveBeenCalled();
     });
 
-    it.each(injectionPayloads)('updateContactLog rejects %j before the write gate', async (payload) => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-
+    it.each(injectionPayloads)('updateContactLog rejects %j before the service', async (payload) => {
       await expect(
         updateContactLog(payload as unknown as number, { Notes: 'x' })
       ).rejects.toThrow('Invalid Contact Log ID');
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
       expect(mockUpdateContactLog).not.toHaveBeenCalled();
     });
 
-    it.each(injectionPayloads)('deleteContactLog rejects %j before the write gate', async (payload) => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
-
+    it.each(injectionPayloads)('deleteContactLog rejects %j before the service', async (payload) => {
       await expect(deleteContactLog(payload as unknown as number)).rejects.toThrow(
         'Invalid Contact Log ID'
       );
-      expect(mockRequireSecurityRoleForWrite).not.toHaveBeenCalled();
       expect(mockDeleteContactLog).not.toHaveBeenCalled();
     });
 
-    it('rejects before authorization but after authentication', async () => {
-      mockGetSession.mockResolvedValueOnce(null);
+    it('refuses an unauthorized caller before it even validates the ID', async () => {
+      // Authorization runs before argument parsing, so a caller with no role
+      // gets one answer — "not authorized" — and learns nothing about which
+      // IDs the endpoint would have accepted.
+      mockRequireSecurityRole.mockRejectedValueOnce(noMpUser());
 
       await expect(deleteContactLog('1 OR 1=1' as unknown as number)).rejects.toThrow(
-        'Authentication required'
+        /no Ministry Platform user is attached/
       );
     });
 
     it('passes a digits-only ID through to the service as a number', async () => {
-      mockGetSession.mockResolvedValueOnce(mockAuthSession);
       mockGetContactLogById.mockResolvedValueOnce({ Contact_Log_ID: 42 });
 
       await getContactLogById('42' as unknown as number);

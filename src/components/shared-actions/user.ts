@@ -2,6 +2,7 @@
 
 import { MPUserProfile } from "@/lib/providers/ministry-platform/types";
 import { UserService } from '@/services/userService';
+import { AuthorizationService } from '@/services/authorizationService';
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 
@@ -16,6 +17,11 @@ import { headers } from "next/headers";
  *
  * If a feature ever needs to read another user's profile, add a separate,
  * explicitly role-gated function rather than widening this one.
+ *
+ * Requires only an authenticated session: any MP user may sign in and see the
+ * app shell, so their own profile (avatar, name, sign-out menu) must load even
+ * with no security role. The profile carries `canAccessContactFeatures` so the
+ * UI can hide links the user would only be refused at — see below.
  *
  * @returns The signed-in user's profile data, or undefined if MP has no match
  */
@@ -32,5 +38,19 @@ export async function getCurrentUserProfile(): Promise<MPUserProfile | undefined
 
   const userService = await UserService.getInstance();
   const userProfile = await userService.getUserProfile(userGuid);
-  return userProfile;
+  if (!userProfile) return undefined;
+
+  // UX only — NOT a security control. Computed server-side with the same gate
+  // the pages, actions and services enforce with (`hasSecurityRole` is the
+  // non-throwing form `requireSecurityRole` is built on), so the nav and the
+  // enforcement can never disagree about policy. Hiding a link stops a
+  // role-less user being handed something that will only refuse them; it does
+  // not stop anyone calling the action directly, which is why all three
+  // enforcement layers exist.
+  const decision = await AuthorizationService.getInstance().hasSecurityRole({
+    table: 'Contacts',
+    operation: 'read',
+  });
+
+  return { ...userProfile, canAccessContactFeatures: decision.permitted };
 }

@@ -1,21 +1,36 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockContactSearch, mockGetSession } = vi.hoisted(() => ({
+/**
+ * searchContacts action tests.
+ *
+ * The action is a compiled POST endpoint that returns 20 contacts' names,
+ * emails and phone numbers. As of F1 (2026-09-12) a session is no longer
+ * sufficient to call it: MP's OIDC endpoint authenticates any `dp_Users`
+ * record, and this app reads MP with its own client-credentials service
+ * account, so only `AuthorizationService` decides who may see this data.
+ */
+
+const { mockContactSearch, mockRequireSecurityRole } = vi.hoisted(() => ({
   mockContactSearch: vi.fn(),
-  mockGetSession: vi.fn(),
+  mockRequireSecurityRole: vi.fn(),
 }));
 
-vi.mock('@/lib/auth', () => ({
-  auth: {
-    api: {
-      getSession: mockGetSession,
+vi.mock('@/services/authorizationService', () => {
+  class UnauthorizedError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'UnauthorizedError';
+    }
+  }
+  return {
+    UnauthorizedError,
+    AuthorizationService: {
+      getInstance: () => ({
+        requireSecurityRole: mockRequireSecurityRole,
+      }),
     },
-  },
-}));
-
-vi.mock('next/headers', () => ({
-  headers: vi.fn().mockResolvedValue(new Headers()),
-}));
+  };
+});
 
 vi.mock('@/services/contactService', () => ({
   ContactService: {
@@ -26,36 +41,69 @@ vi.mock('@/services/contactService', () => ({
 }));
 
 import { searchContacts } from './actions';
+import { UnauthorizedError } from '@/services/authorizationService';
 
-const mockAuthSession = {
-  user: { id: 'internal-id', userGuid: 'user-guid-123' },
-};
+/** The gate's refusal for a session with no MP user behind it. */
+function noMpUser() {
+  return new UnauthorizedError(
+    'Not authorized: no Ministry Platform user is attached to this session (read on Contacts)'
+  );
+}
+
+/** The gate's refusal for an MP user holding no security role. */
+function noRole() {
+  return new UnauthorizedError(
+    'Not authorized: an MP security role is required to read records in Contacts'
+  );
+}
 
 describe('searchContacts', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockGetSession.mockResolvedValue(mockAuthSession);
+    // Default: an authorized role-holder.
+    mockRequireSecurityRole.mockResolvedValue(99);
   });
 
-  it('should require authentication', async () => {
-    mockGetSession.mockResolvedValue(null);
+  it('gates the read on an MP security role, not merely a session', async () => {
+    mockContactSearch.mockResolvedValueOnce([]);
 
-    await expect(searchContacts('John')).rejects.toThrow('Authentication required');
+    await searchContacts('John');
+
+    expect(mockRequireSecurityRole).toHaveBeenCalledWith({
+      table: 'Contacts',
+      operation: 'read',
+    });
+  });
+
+  it('rejects a session with no Ministry Platform user', async () => {
+    mockRequireSecurityRole.mockRejectedValueOnce(noMpUser());
+
+    await expect(searchContacts('John')).rejects.toThrow(UnauthorizedError);
     expect(mockContactSearch).not.toHaveBeenCalled();
   });
 
-  it('should reject a session with no user id', async () => {
-    mockGetSession.mockResolvedValue({ user: { userGuid: 'user-guid-123' } });
+  it('rejects an MP user who holds no security role', async () => {
+    mockRequireSecurityRole.mockRejectedValueOnce(noRole());
 
-    await expect(searchContacts('John')).rejects.toThrow('Authentication required');
+    await expect(searchContacts('John')).rejects.toThrow(
+      /an MP security role is required/
+    );
     expect(mockContactSearch).not.toHaveBeenCalled();
   });
 
-  it('should reject an unauthenticated caller before validating the search term', async () => {
-    mockGetSession.mockResolvedValue(null);
+  it('surfaces the denial rather than flattening it into "Failed to search contacts"', async () => {
+    // The gate is deliberately outside the try/catch: a caller must be able to
+    // tell "you may not do this" from "the search blew up".
+    mockRequireSecurityRole.mockRejectedValueOnce(noRole());
 
-    // The empty-term early return must not become an unauthenticated success path.
-    await expect(searchContacts('')).rejects.toThrow('Authentication required');
+    await expect(searchContacts('John')).rejects.toThrow(UnauthorizedError);
+  });
+
+  it('rejects an unauthorized caller before validating the search term', async () => {
+    mockRequireSecurityRole.mockRejectedValueOnce(noMpUser());
+
+    // The empty-term early return must not become an unauthorized success path.
+    await expect(searchContacts('')).rejects.toThrow(UnauthorizedError);
     expect(mockContactSearch).not.toHaveBeenCalled();
   });
 
