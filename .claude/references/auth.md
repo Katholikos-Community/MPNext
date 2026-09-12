@@ -629,6 +629,26 @@ and a `reason` of `no_mp_user` / `no_security_role` / `role_not_permitted` — s
 operations are greppable in production logs. `hasSecurityRole` logs nothing: it runs on
 every profile load, and the UI asking "may they?" is not an incident.
 
+#### Logging policy (F5, closed 2026-09-12)
+
+No debug/info logging (`console.log`/`.debug`/`.info`) is allowed in `src/` outside
+`src/lib/providers/ministry-platform/scripts/` (dev-only CLI tools). Contact logs carry
+pastoral notes and every MP read/write can carry member PII (names, emails, phones); a
+hosting or log-aggregation platform retains `console.*` output with broader access and
+longer retention than the MP database itself, so none of that content may reach a log
+line.
+
+`console.error`/`console.warn` in catch blocks may stay, but must log **identifiers and
+shape, never content**: table name, record IDs/counts, HTTP status, and an error's
+`name`/`message` — never an MP result set, a request body, `Notes`, emails, phones,
+names, or a URL/query string containing `$filter`. The HTTP client's failure logs are the
+canonical shape: `{ method, endpoint (path only, no query string), status, statusText }`,
+and the thrown `Error`'s message keeps only `status`/`statusText`/`endpoint` — no
+response body. The four structured events above (`mp.read.unauthorized`,
+`mp.write.unauthorized`, `mp.write.non_user`, and `auth.userinfo.invalid_sub` in
+`src/lib/auth.ts`) are the greppable contract this policy exists alongside; they already
+log identifiers only and are unaffected by it.
+
 ### Caching: per request, never across requests
 
 The gate now runs at up to three layers per request, so the `dp_User_Roles` read is
@@ -697,6 +717,7 @@ server-side; defence in depth).
 | **F3** (Medium) — open redirect via `callbackUrl` on `/signin` | 2026-09-12 | `sanitizeCallbackUrl`, applied to both redirect sinks |
 | **F10** (Low) — `ContactService.updateContact` wrote with no authorization | 2026-09-12 | Calls `requireSecurityRole({ table: "Contacts", operation: "update" })` and uses its `User_ID` for `$userId` |
 | **F11** (Low) — `getMpTimezone` had no check at all | 2026-09-12 | Authenticated-session check (its only consumer is the role-gated contact page) |
+| **F5** (Medium) — member PII and pastoral notes written to server logs at info level | 2026-09-12 | Removed all `console.log`/`.debug`/`.info` from non-script `src/`; error logs now carry identifiers/shape only (no request bodies, result sets, `Notes`, or `$filter`/full URLs); see § Logging policy above |
 
 ## Environment Variables
 
