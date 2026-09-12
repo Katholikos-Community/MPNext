@@ -65,6 +65,36 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 - **State**: OAuth state stored in cookie (`storeStateStrategy: "cookie"`)
 - **No database**: Uses in-memory adapter (data lost on server restart, users must re-login)
 
+### Account linking (disabled)
+
+> 🔒 **`account.accountLinking.enabled` is explicitly `false`.** With a single
+> OAuth provider, identity belongs to Ministry Platform, not better-auth —
+> there is no legitimate reason for a second provider account to be linked
+> onto an existing user by matching email. But that is exactly what
+> better-auth's default OAuth callback does: when no account exists yet for
+> the incoming `(providerId, sub)`, it falls back to `findUserByEmail`, and if
+> both the stored user and the incoming profile are `emailVerified`, it
+> implicitly links the new `sub` onto that **existing** user and issues a
+> session for them. Since MP household/contact data commonly shares one email
+> across multiple people, this is a real identity-takeover path: the second
+> person to sign in with a shared email would silently inherit the first
+> person's `userGuid` and MP `User_ID`.
+>
+> Setting `accountLinking: { enabled: false }` makes
+> `node_modules/better-auth/dist/oauth2/link-account.mjs` take its
+> `"account not linked"` refusal branch instead of merging
+> (`accountLinking?.enabled === false` is one of the OR'd conditions gating
+> that branch). This pairs with `getUserInfo` returning the provider's real
+> `email_verified` claim (`profile.email_verified === true`, defaulting to
+> `false`) rather than a hardcoded `true` — see the table entry below.
+>
+> `src/auth.test.ts` guards both halves: a config assertion that
+> `accountLinking.enabled` stays `false`, `getUserInfo` guards for the
+> `emailVerified` claim, and a behavioral test that drives the real
+> `handleOAuthUserInfo` (from `better-auth/oauth2`) against the app's actual
+> in-memory `auth` instance with two different `sub` values sharing one
+> email, asserting the second sign-in is refused rather than merged.
+
 ### genericOAuth Configuration
 
 | Setting | Value | Notes |
@@ -73,7 +103,7 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 | `discoveryUrl` | `${MP_BASE_URL}/oauth/.well-known/openid-configuration` | OIDC auto-discovery |
 | `scopes` | `openid`, `offline_access`, `dataplatform/scopes/all` | Full MP API access |
 | `pkce` | `false` | Explicitly disabled — 1.7 defaults this to `true` (see 1.7 notes below) |
-| `getUserInfo` | Custom callback | Fetches OIDC userinfo, returns `sub: profile.sub` |
+| `getUserInfo` | Custom callback | Fetches OIDC userinfo, returns `sub: profile.sub` and `emailVerified: profile.email_verified === true` (not hardcoded — see [Account linking](#account-linking-disabled)) |
 | `mapProfileToUser` | Custom callback | Stores `profile.sub` as `userGuid` |
 
 ### Better Auth 1.7 migration notes

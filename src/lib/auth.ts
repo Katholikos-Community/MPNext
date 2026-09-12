@@ -144,6 +144,22 @@ const options = {
   account: {
     storeStateStrategy: "cookie" as const,
     storeAccountCookie: true,
+    // Identity here belongs to Ministry Platform, not better-auth. With a
+    // single OAuth provider there is no legitimate case for linking a new
+    // provider account onto an existing user by matching email — but
+    // better-auth's default OAuth callback does exactly that (see
+    // node_modules/better-auth/dist/oauth2/link-account.mjs): when no
+    // account exists for the incoming (providerId, sub), it falls back to
+    // findUserByEmail and, if that user is emailVerified and the incoming
+    // profile claims emailVerified, silently links the new sub to the
+    // EXISTING user's record — handing a second person who shares that
+    // email the first person's userGuid/User_ID (MP household data commonly
+    // shares emails across contacts). Disabling account linking makes that
+    // callback refuse the merge ("account not linked") instead.
+    // `src/auth.test.ts` guards this.
+    accountLinking: {
+      enabled: false,
+    },
   },
   user: {
     additionalFields: userAdditionalFields,
@@ -206,12 +222,20 @@ const options = {
             // `profile.sub` from this raw profile. Returning only `id` (the
             // pre-1.7 shape) resolves the subject to "" and breaks account
             // identity. `src/auth.test.ts` guards this.
+            //
+            // `emailVerified` MUST reflect the provider's own claim, not be
+            // hardcoded true. better-auth's OAuth callback uses this value
+            // (together with the stored user's emailVerified) to decide
+            // whether to implicitly link accounts by email — see the
+            // `accountLinking` comment above. MP's userinfo response may not
+            // send `email_verified` at all, so default to false rather than
+            // assume it. `src/auth.test.ts` guards this.
             return {
               sub: profile.sub,
               email: profile.email,
               name: `${profile.given_name} ${profile.family_name}`,
               image: undefined,
-              emailVerified: true,
+              emailVerified: profile.email_verified === true,
             };
           },
           // Map the OAuth sub claim (User_GUID) to our custom userGuid field.

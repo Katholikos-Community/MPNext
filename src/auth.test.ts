@@ -5,6 +5,8 @@ import type {
   GenericOAuthOptions,
 } from 'better-auth/plugins';
 import type { OAuth2Tokens } from '@better-auth/core/oauth2';
+import type { GenericEndpointContext } from '@better-auth/core';
+import { handleOAuthUserInfo } from 'better-auth/oauth2';
 
 const { mockGetTableRecords } = vi.hoisted(() => ({
   mockGetTableRecords: vi.fn(),
@@ -354,6 +356,7 @@ describe('Auth - OAuth Configuration', () => {
           given_name: 'John',
           family_name: 'Doe',
           email: 'john@example.com',
+          email_verified: true,
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       ),
@@ -374,6 +377,63 @@ describe('Auth - OAuth Configuration', () => {
       email: 'john@example.com',
       emailVerified: true,
     });
+  });
+
+  /**
+   * F2 security-review guard: `emailVerified` must reflect MP's own claim,
+   * not be hardcoded. better-auth's OAuth callback uses this value to decide
+   * whether to implicitly link an incoming OAuth account onto an existing
+   * user by email match (node_modules/better-auth/dist/oauth2/link-account.mjs).
+   * MP's userinfo response may omit `email_verified` entirely, so the default
+   * MUST be false, never true. See also the `accountLinking.enabled: false`
+   * guard below, which is the primary fix — this guards the claim feeding it.
+   */
+  it('defaults emailVerified to false when MP userinfo omits email_verified (F2 guard)', async () => {
+    const config = getMpProviderConfig();
+    const guid = 'ab12cd34-ef56-7890-abcd-ef1234598001';
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          sub: guid,
+          given_name: 'Jane',
+          family_name: 'Roe',
+          email: 'jane@example.com',
+          // no email_verified claim
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const profile = await config.getUserInfo!({
+      accessToken: 'access-token',
+    } as OAuth2Tokens);
+
+    expect(profile).toMatchObject({ emailVerified: false });
+  });
+
+  it('sets emailVerified true only when MP userinfo explicitly claims it (F2 guard)', async () => {
+    const config = getMpProviderConfig();
+    const guid = 'ab12cd34-ef56-7890-abcd-ef1234598002';
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          sub: guid,
+          given_name: 'Jane',
+          family_name: 'Roe',
+          email: 'jane@example.com',
+          email_verified: true,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const profile = await config.getUserInfo!({
+      accessToken: 'access-token',
+    } as OAuth2Tokens);
+
+    expect(profile).toMatchObject({ emailVerified: true });
   });
 
   it('returns null from getUserInfo when the userinfo request fails', async () => {
@@ -434,6 +494,27 @@ describe('Auth - OAuth Configuration', () => {
     );
 
     expect(parsed).toHaveProperty('userGuid', guid);
+  });
+
+  /**
+   * F2 security-review guard (config): account linking must stay disabled.
+   *
+   * better-auth's OAuth callback (link-account.mjs) falls back to
+   * findUserByEmail when no account matches (providerId, sub). If the
+   * matched user and the incoming profile are both emailVerified, it
+   * implicitly links the new provider account onto that EXISTING user and
+   * issues a session for them — handing a second person who shares that
+   * email the first person's userGuid/User_ID. MP household data commonly
+   * shares an email across multiple contacts, so this is a real identity
+   * takeover path, not a theoretical one. `accountLinking.enabled: false`
+   * makes link-account.mjs take the "account not linked" branch instead
+   * (verified directly against node_modules/better-auth/dist/oauth2/link-account.mjs
+   * line ~79: `accountLinking?.enabled === false` is one of the OR'd
+   * conditions that trigger the refusal). See also the behavioral guard
+   * below.
+   */
+  it('disables implicit account linking by email (F2 guard)', () => {
+    expect(auth.options.account?.accountLinking?.enabled).toBe(false);
   });
 
   it('should distinguish user.id (Better Auth internal) from userGuid (MP User_GUID)', () => {
@@ -543,5 +624,71 @@ describe('Auth - disabled account-management endpoints', () => {
     );
 
     expect(response.status).not.toBe(404);
+  });
+});
+
+/**
+ * F2 security-review behavioral guard: drives better-auth's REAL account
+ * linking/creation logic (`handleOAuthUserInfo`, the same function
+ * `src/app/api/auth/[...all]/route.ts`'s OAuth callback calls) against the
+ * app's real, in-memory `auth` instance — no HTTP, no MP calls, no database.
+ *
+ * This reproduces finding F2 end-to-end at the library boundary: two
+ * different OAuth `sub` values (i.e. two different MP contacts) sharing one
+ * email. Before the fix (`accountLinking.enabled: false` in
+ * `src/lib/auth.ts`), the second sign-in would silently link onto the first
+ * user's record and return THEIR session/user — full identity takeover.
+ * After the fix, better-auth's `link-account.mjs` takes its
+ * `"account not linked"` refusal branch instead (confirmed by reading the
+ * library source — see the comment on `accountLinking` in `src/lib/auth.ts`).
+ */
+describe('Auth - F2 account-linking behavioral guard', () => {
+  function buildUserInfo(sub: string, email: string) {
+    return {
+      id: sub,
+      email,
+      emailVerified: true,
+      name: 'Shared Email User',
+      image: undefined,
+    };
+  }
+
+  it('refuses to implicitly link a second sub sharing an existing user\'s email', async () => {
+    const context = await auth.$context;
+    // `storeAccountCookie: true` (src/lib/auth.ts) makes handleOAuthUserInfo
+    // write an account cookie via `ctx.setCookie`/`ctx.getCookie`, which only
+    // exist on the real request-endpoint context better-call builds per
+    // request. Stub the two the cookie store touches; no-ops are fine here —
+    // this test only cares about the account-linking decision, not cookies.
+    const c = {
+      context,
+      headers: new Headers(),
+      setCookie: () => {},
+      getCookie: () => null,
+    } as unknown as GenericEndpointContext;
+    const email = 'f2-shared-guard@example.com';
+
+    const first = await handleOAuthUserInfo(c, {
+      userInfo: buildUserInfo('f2-behavioral-sub-one', email),
+      account: { providerId: 'ministry-platform', accountId: 'f2-behavioral-sub-one' },
+      callbackURL: '/',
+    });
+
+    expect(first.error).toBeNull();
+    expect(first.isRegister).toBe(true);
+    expect(first.data?.user.email).toBe(email);
+
+    const second = await handleOAuthUserInfo(c, {
+      userInfo: buildUserInfo('f2-behavioral-sub-two', email),
+      account: { providerId: 'ministry-platform', accountId: 'f2-behavioral-sub-two' },
+      callbackURL: '/',
+    });
+
+    // The vulnerable behavior would have returned `error: null` here with
+    // `data.user` equal to the FIRST user (same id, same userGuid) — this
+    // second sign-in taking over that identity. The fix refuses instead.
+    expect(second.error).toBe('account not linked');
+    expect(second.data).toBeNull();
+    expect(second.data?.user.id).not.toBe(first.data?.user.id);
   });
 });
