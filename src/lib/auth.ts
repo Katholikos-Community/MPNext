@@ -89,9 +89,51 @@ export async function enrichSessionUser<
   };
 }
 
+/**
+ * Built-in account-management endpoints better-auth mounts unconditionally,
+ * which this app must NOT expose. `disabledPaths` is matched in the router's
+ * `onRequest` — before rate limiting, plugins, and `sessionMiddleware` — so
+ * these return 404 to authenticated and anonymous callers alike.
+ *
+ * `/update-user` is the security-critical one. Its body schema is
+ * `z.record(z.string(), z.any())`; it rejects only `email` and passes every
+ * other key to `parseUserInput`, which copies any additional field declared
+ * `input !== false` verbatim, with no validator, then re-mints the session
+ * cookie from the result. Because `userGuid` MUST stay `input: true` (see
+ * `userAdditionalFields` above), leaving this path open would let any
+ * authenticated user POST `{ userGuid: "<someone else's MP User_GUID>" }` and
+ * assume that user's identity: their MP roles and groups on every downstream
+ * authorization check, and their `User_ID` on every MP write, so `dp_Audit_Log`
+ * would attribute the caller's actions to the victim.
+ *
+ * `input: false` is NOT an alternative fix — it breaks sign-in (see the comment
+ * on `userAdditionalFields`). As of better-auth 1.6 the `input` flag governs
+ * both "may the OAuth provider profile populate this" and "may a user POST
+ * this", and no value of it satisfies both. The protection therefore has to
+ * live here, at the endpoint layer. A field-level `validator.input` would not
+ * work either: it runs on the provider-profile path too, so it can constrain
+ * the GUID's shape but cannot tell `mapProfileToUser` from an attacker sending
+ * a well-formed GUID.
+ *
+ * The rest are closed because identity is Ministry Platform's — this app does
+ * no self-service account management, and nothing in `src/` calls them.
+ *
+ * `src/auth.test.ts` asserts both halves: that `userGuid` stays writable, and
+ * that these paths 404. Removing either one fails the build.
+ */
+export const disabledAuthPaths = [
+  "/update-user",
+  "/change-email",
+  "/change-password",
+  "/set-password",
+  "/delete-user",
+  "/delete-user/callback",
+];
+
 const options = {
   baseURL: process.env.BETTER_AUTH_URL || process.env.NEXTAUTH_URL,
   secret: process.env.BETTER_AUTH_SECRET || process.env.NEXTAUTH_SECRET,
+  disabledPaths: disabledAuthPaths,
   session: {
     cookieCache: {
       enabled: true,

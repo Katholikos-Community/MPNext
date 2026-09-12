@@ -149,6 +149,62 @@ user: {
 > against the real field config. Do not "tighten" this back to `input: false`.
 > Still true as of better-auth 1.7.
 
+> 🔒 **`input: true` is only safe because `/update-user` is disabled.** These two
+> settings are a matched pair — neither is correct alone. See
+> [Disabled Endpoints](#disabled-endpoints) below before changing either.
+
+### Disabled Endpoints
+
+`src/lib/auth.ts` exports `disabledAuthPaths` and passes it as `disabledPaths`:
+
+```typescript
+export const disabledAuthPaths = [
+  "/update-user",
+  "/change-email",
+  "/change-password",
+  "/set-password",
+  "/delete-user",
+  "/delete-user/callback",
+];
+```
+
+better-auth matches `disabledPaths` in the router's `onRequest` — before rate
+limiting, plugins, and `sessionMiddleware` — so these return **404** to
+authenticated and anonymous callers alike.
+
+> ⚠️ **`/update-user` is a privilege escalation if reopened.** Its body schema is
+> `z.record(z.string(), z.any())`; it rejects only `email` and passes every other
+> key to `parseUserInput`, which copies any additional field declared
+> `input !== false` verbatim, with **no validator**, then re-mints the session
+> cookie from the result. Its only gate is `sessionMiddleware`. Combined with
+> `userGuid: input: true` (mandatory, above), any authenticated user could run
+> `fetch('/api/auth/update-user', { method: 'POST', body: '{"userGuid":"<victim>"}' })`
+> and assume that user's identity — their MP roles and groups on every
+> authorization check, and their `User_ID` on every MP write, so `dp_Audit_Log`
+> attributes the caller's actions to the victim. The stateless/no-database setup
+> is **not** a mitigation: the handler falls back to `{ ...session.user,
+> ...additionalFields }` when the adapter returns nothing, so the value still
+> lands in the cookie.
+
+**Why the fix lives at the endpoint layer.** As of better-auth 1.6 the `input`
+flag governs *both* "may the OAuth provider profile populate this" (needs `true`)
+and "may a user POST this" (needs `false`). No value satisfies both, so the
+protection cannot live on the field. A field-level `validator.input` does not
+work either — it runs on the provider-profile path too, so it can constrain the
+GUID's *shape* but cannot distinguish `mapProfileToUser` from an attacker sending
+a well-formed GUID.
+
+**Testing.** `src/auth.test.ts` asserts **both halves** — that `userGuid` stays
+writable *and* that these paths 404 (verified against the real `auth.handler`,
+plus a control asserting a non-disabled path still routes). Removing either
+protection fails the build. Do not delete one test to make the other pass.
+
+**History.** Introduced 2026-07-09 in `c9d80d4`, which flipped `userGuid` to
+`input: true` to repair sign-in after the 1.6 upgrade (`720f39d`) without closing
+the endpoint that the flag had been implicitly guarding since February. Before
+that, `input: false` made `/update-user` answer `400 — userGuid is not allowed to
+be set`.
+
 ### customSession Callback
 
 The `customSession` callback only does lightweight name splitting. It does **not** make any API calls. Profile loading is handled by `UserProvider` on the client side.
