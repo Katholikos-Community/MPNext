@@ -68,4 +68,15 @@ describe("/session-error page", () => {
 
     expect(mockHandleSignOut).not.toHaveBeenCalled();
   });
+
+  /**
+   * F9: prerendering this page would leave it without a CSP nonce and so
+   * without hydration under an enforcing policy — on the one page whose entire
+   * purpose is giving a stranded user a working sign-out button.
+   */
+  it("opts out of prerendering", async () => {
+    const pageModule = await import("./page");
+
+    expect(pageModule.dynamic).toBe("force-dynamic");
+  });
 });
