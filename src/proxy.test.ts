@@ -21,10 +21,19 @@ vi.mock('better-auth/cookies', () => ({
   getSessionCookie: mockGetSessionCookie,
 }));
 
-// Mock NextResponse since next/server may not work in test env
+// Mock NextResponse since next/server may not work in test env.
+//
+// The mock responses carry a real `Headers` instance: the proxy sets the
+// Content-Security-Policy on whatever it returns, so a bare object literal
+// would throw on `response.headers.set`.
 const { mockNext, mockRedirect } = vi.hoisted(() => ({
-  mockNext: vi.fn(() => ({ type: 'next' })),
-  mockRedirect: vi.fn((url: URL) => ({ type: 'redirect', url })),
+  // Typed via the generic rather than an unused parameter, so that
+  // `mockNext.mock.calls[0][0]` can be read back to assert what the proxy
+  // forwarded to the renderer.
+  mockNext: vi.fn<
+    (init?: { request?: { headers: Headers } }) => { type: string; headers: Headers }
+  >(() => ({ type: 'next', headers: new Headers() })),
+  mockRedirect: vi.fn((url: URL) => ({ type: 'redirect', url, headers: new Headers() })),
 }));
 
 vi.mock('next/server', () => ({
@@ -42,7 +51,26 @@ function createMockRequest(pathname: string, baseUrl = 'http://localhost:3000') 
   return {
     nextUrl: url,
     url: url.toString(),
+    // The proxy clones these to forward the nonce to the renderer.
+    headers: new Headers(),
   } as unknown as NextRequest;
+}
+
+/** The CSP value off whichever response the proxy returned. */
+function cspFrom(response: unknown): string {
+  const headers = (response as { headers: Headers }).headers;
+  return (
+    headers.get('content-security-policy') ??
+    headers.get('content-security-policy-report-only') ??
+    ''
+  );
+}
+
+/** The request headers the proxy forwarded to the renderer via NextResponse.next. */
+function forwardedRequestHeaders(): Headers {
+  const headers = mockNext.mock.calls[0]?.[0]?.request?.headers;
+  if (!headers) throw new Error('NextResponse.next was not called with request headers');
+  return headers;
 }
 
 describe('proxy', () => {
@@ -139,6 +167,119 @@ describe('proxy', () => {
       expect(mockRedirect).toHaveBeenCalledWith(
         expect.objectContaining({ pathname: '/signin' })
       );
+    });
+  });
+
+  /**
+   * F9: the proxy is the only place a per-request CSP nonce can be minted, so
+   * these assert both halves of the contract — the header on the way out, and
+   * the nonce forwarded on the request headers, which is the only way Next.js
+   * learns what to stamp onto its own script tags.
+   */
+  describe('Content-Security-Policy', () => {
+    it('sets a CSP on an allowed protected request', async () => {
+      mockGetSessionCookie.mockReturnValueOnce('session-token-value');
+
+      const response = await proxy(createMockRequest('/home'));
+
+      expect(cspFrom(response)).toContain("default-src 'self'");
+      expect(cspFrom(response)).toContain("frame-ancestors 'none'");
+    });
+
+    it('sets a CSP on a public path', async () => {
+      const response = await proxy(createMockRequest('/signin'));
+
+      expect(cspFrom(response)).toContain("default-src 'self'");
+    });
+
+    it.each([
+      ['no session cookie', () => mockGetSessionCookie.mockReturnValueOnce(null)],
+      [
+        'a failing session check',
+        () =>
+          mockGetSessionCookie.mockImplementationOnce(() => {
+            throw new Error('Cookie parsing error');
+          }),
+      ],
+    ])('sets a CSP on the redirect produced by %s', async (_label, arrange) => {
+      arrange();
+
+      const response = await proxy(createMockRequest('/home'));
+
+      expect(cspFrom(response)).toContain("default-src 'self'");
+    });
+
+    it('forwards the nonce to the renderer on the request headers', async () => {
+      mockGetSessionCookie.mockReturnValueOnce('session-token-value');
+
+      const response = await proxy(createMockRequest('/home'));
+      const nonce = forwardedRequestHeaders().get('x-nonce');
+
+      // Next.js re-reads the policy off the REQUEST to find the nonce, so both
+      // must be present and must agree with the response policy. A mismatch
+      // here is the failure that renders a blank page under enforcement.
+      expect(nonce).toBeTruthy();
+      expect(forwardedRequestHeaders().get('content-security-policy-report-only')).toContain(
+        `'nonce-${nonce}'`
+      );
+      expect(cspFrom(response)).toContain(`'nonce-${nonce}'`);
+    });
+
+    it('mints a different nonce for every request', async () => {
+      mockGetSessionCookie.mockReturnValue('session-token-value');
+
+      const first = cspFrom(await proxy(createMockRequest('/home')));
+      const second = cspFrom(await proxy(createMockRequest('/home')));
+
+      const nonceOf = (csp: string) => /'nonce-([^']+)'/.exec(csp)?.[1];
+      expect(nonceOf(first)).toBeTruthy();
+      expect(nonceOf(first)).not.toBe(nonceOf(second));
+    });
+
+    it('reports rather than enforces by default', async () => {
+      const response = await proxy(createMockRequest('/signin'));
+      const headers = (response as unknown as { headers: Headers }).headers;
+
+      expect(headers.get('content-security-policy-report-only')).toBeTruthy();
+      expect(headers.get('content-security-policy')).toBeNull();
+    });
+
+    it('enforces when CSP_ENFORCE is true', async () => {
+      vi.stubEnv('CSP_ENFORCE', 'true');
+
+      const response = await proxy(createMockRequest('/signin'));
+      const headers = (response as unknown as { headers: Headers }).headers;
+
+      expect(headers.get('content-security-policy')).toBeTruthy();
+      expect(headers.get('content-security-policy-report-only')).toBeNull();
+
+      // Targeted, not `vi.unstubAllEnvs()`: that would also drop the stubs
+      // src/test-setup.ts installs for every test in this file.
+      vi.stubEnv('CSP_ENFORCE', undefined);
+    });
+
+    it('allows the Ministry Platform file server in img-src', async () => {
+      // Contact photos are `next/image` with `unoptimized`, so the browser
+      // fetches them straight from MP. Without this origin every avatar breaks.
+      vi.stubEnv(
+        'NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL',
+        'https://files.example.com/ministryplatformapi/files'
+      );
+
+      const response = await proxy(createMockRequest('/signin'));
+
+      expect(cspFrom(response)).toContain('img-src');
+      expect(cspFrom(response)).toContain('https://files.example.com');
+
+      vi.stubEnv('NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL', undefined);
+    });
+
+    it('allows the Ministry Platform origin in form-action', async () => {
+      // Sign-out is a form-driven server action that redirects to MP's
+      // endsession endpoint; `form-action 'self'` alone aborts that redirect.
+      const response = await proxy(createMockRequest('/signin'));
+
+      expect(cspFrom(response)).toContain("form-action 'self' https://test-mp.example.com");
     });
   });
 

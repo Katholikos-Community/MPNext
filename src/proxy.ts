@@ -1,8 +1,51 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getSessionCookie } from 'better-auth/cookies';
+import {
+  buildContentSecurityPolicy,
+  createNonce,
+  cspHeaderName,
+  originOf,
+} from '@/lib/security-headers';
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // --- Content-Security-Policy (F9) -----------------------------------------
+  //
+  // Built here rather than in `next.config.ts` because the nonce has to be
+  // fresh per request; a value fixed at build time is a constant an attacker
+  // can read off any page. The static, request-independent headers
+  // (X-Frame-Options, HSTS, Referrer-Policy, ...) live in `next.config.ts`
+  // instead, so that they also cover `/api` and the static-asset paths the
+  // matcher at the bottom of this file excludes.
+  //
+  // Ships as `Content-Security-Policy-Report-Only` until `CSP_ENFORCE=true`.
+  const nonce = createNonce();
+  const csp = buildContentSecurityPolicy({
+    nonce,
+    isDev: process.env.NODE_ENV === 'development',
+    imageOrigin: originOf(process.env.NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL),
+    formActionOrigin: originOf(process.env.MINISTRY_PLATFORM_BASE_URL),
+  });
+  const cspHeader = cspHeaderName();
+
+  // Next.js does not take the nonce from an argument — it re-reads it off the
+  // INCOMING request headers during render and stamps it onto the framework's
+  // own script and style tags (see app-render.js, which accepts either the
+  // enforcing or the report-only header name). Setting it on the response
+  // alone would produce a policy whose nonce matches nothing on the page.
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set('x-nonce', nonce);
+  requestHeaders.set(cspHeader, csp);
+
+  // Applied to every return path below, redirects included. A redirect body is
+  // never rendered, so the header does nothing there — it is set anyway so the
+  // invariant is "every response this proxy produces carries a CSP", with no
+  // exception for a reader to wonder about.
+  const withCsp = <T extends Response>(response: T): T => {
+    response.headers.set(cspHeader, csp);
+    return response;
+  };
 
   // Early returns for public paths
   // `/auth-error` must stay public: AuthWrapper's session gate would otherwise
@@ -10,24 +53,24 @@ export async function proxy(request: NextRequest) {
   // `/signin`, which immediately restarts OAuth — a loop that never lets the
   // user see why sign-in failed.
   if (pathname.startsWith('/api') || pathname === '/signin' || pathname === '/auth-error') {
-    return NextResponse.next();
+    return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
   }
 
   try {
     const sessionCookie = getSessionCookie(request);
 
     if (!sessionCookie) {
-      return NextResponse.redirect(new URL('/signin', request.url));
+      return withCsp(NextResponse.redirect(new URL('/signin', request.url)));
     }
 
-    return NextResponse.next();
+    return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
 
   } catch (error) {
     console.error(
       'Proxy: error checking session',
       error instanceof Error ? error.message : String(error)
     );
-    return NextResponse.redirect(new URL('/signin', request.url));
+    return withCsp(NextResponse.redirect(new URL('/signin', request.url)));
   }
 }
 

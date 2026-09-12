@@ -1,77 +1,23 @@
-"use client";
-
-import { useEffect, useState, Suspense } from "react";
-import { authClient } from "@/lib/auth-client";
-import { useSearchParams } from "next/navigation";
+import { SignIn } from "@/components/sign-in";
 
 /**
- * Reduces a `callbackUrl` query parameter to a safe, same-origin destination.
+ * Rendered per request, never prerendered (F9).
  *
- * F3 (2026-09-12): the raw parameter was assigned straight to
- * `window.location.href` for an already-signed-in visitor, which made /signin an
- * open redirect — `?callbackUrl=https://evil.example` sent the user off-site
- * from a URL that looks like this app's own login. Only a relative path rooted
- * at `/` is honored; everything else falls back to `/`.
+ * The Content-Security-Policy in `src/proxy.ts` is nonce-based, and Next.js can
+ * only stamp that nonce onto its own script tags while it is rendering a
+ * request. A page prerendered at build time has no request and so no nonce,
+ * which means an enforcing CSP blocks its bootstrap script and the page never
+ * hydrates. /signin does nothing but run client-side effects, so an unhydrated
+ * one is a permanent spinner that never reaches Ministry Platform.
  *
- * The three rejected shapes that matter: an absolute URL (`https://evil…`), a
- * protocol-relative URL (`//evil…`, which the browser resolves as another
- * origin), and `/\evil…`, which browsers normalize to `//evil…`.
+ * This is also why the page body moved to `src/components/sign-in`: route
+ * segment config is IGNORED in a file marked "use client". The export below
+ * had no effect while it sat in a client module — the build output still read
+ * "○ /signin" — and a server component is the only thing that can opt this
+ * route out of prerendering.
  */
-function sanitizeCallbackUrl(raw: string | null | undefined): string {
-  if (!raw || !raw.startsWith("/")) return "/";
-  if (raw.startsWith("//") || raw.startsWith("/\\")) return "/";
-  return raw;
-}
+export const dynamic = "force-dynamic";
 
-function SignInContent() {
-  const searchParams = useSearchParams();
-  const callbackUrl = sanitizeCallbackUrl(searchParams?.get("callbackUrl"));
-  const [isRedirecting, setIsRedirecting] = useState(false);
-
-  useEffect(() => {
-    // Check if user is already signed in
-    authClient.getSession().then(({ data: session }) => {
-      if (session) {
-        // User is already signed in, redirect to callback URL
-        window.location.href = callbackUrl;
-      } else if (!isRedirecting) {
-        // User is not signed in, initiate sign in
-        setIsRedirecting(true);
-        // better-auth 1.7 routes generic OAuth providers through the standard
-        // social sign-in path; `signIn.oauth2()` was removed.
-        authClient.signIn.social({
-          provider: "ministry-platform",
-          callbackURL: callbackUrl,
-        });
-      }
-    });
-  }, [callbackUrl, isRedirecting]);
-
-  return (
-    <div className="flex items-center justify-center min-h-screen">
-      <div className="text-center">
-        <h2 className="text-2xl font-semibold mb-4">Redirecting to sign in...</h2>
-        <div className="animate-spin h-8 w-8 border-4 border-blue-500 rounded-full border-t-transparent mx-auto"></div>
-      </div>
-    </div>
-  );
-}
-
-function SignInFallback() {
-  return (
-    <div className="flex items-center justify-center min-h-screen">
-      <div className="text-center">
-        <h2 className="text-2xl font-semibold mb-4">Loading...</h2>
-        <div className="animate-spin h-8 w-8 border-4 border-blue-500 rounded-full border-t-transparent mx-auto"></div>
-      </div>
-    </div>
-  );
-}
-
-export default function SignIn() {
-  return (
-    <Suspense fallback={<SignInFallback />}>
-      <SignInContent />
-    </Suspense>
-  );
+export default function SignInPage() {
+  return <SignIn />;
 }

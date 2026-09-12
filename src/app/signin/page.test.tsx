@@ -261,4 +261,37 @@ describe("/signin page", () => {
       );
     });
   });
+
+  /**
+   * F9: /signin must never be prerendered.
+   *
+   * Two facts are load-bearing together, and both fail silently. The
+   * nonce-based CSP in src/proxy.ts can only be stamped onto a page Next
+   * renders per request; and route segment config is IGNORED in a module
+   * marked "use client" — which is how this route was written before, and why
+   * the build output still read "○ /signin" with the export already in place.
+   * Putting "use client" back at the top of page.tsx would silently restore
+   * prerendering, and an unhydrated /signin is a spinner that never reaches
+   * Ministry Platform.
+   */
+  describe("rendering mode", () => {
+    it("opts out of prerendering", async () => {
+      const pageModule = await import("./page");
+
+      expect(pageModule.dynamic).toBe("force-dynamic");
+    });
+
+    it("keeps the route file a server component, so that opt-out is honored", async () => {
+      const { readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      const source = await readFile(
+        join(process.cwd(), "src", "app", "signin", "page.tsx"),
+        "utf-8"
+      );
+
+      // The directive at the top of the file, not the phrase — this file's own
+      // comments explain why it must not be there.
+      expect(source.trimStart()).not.toMatch(/^["']use client["']/);
+    });
+  });
 });

@@ -244,6 +244,7 @@ For detailed context on specific areas, see:
 - **[Ministry Platform Query Syntax](.claude/references/ministryplatform.query-syntax.md)** - SQL-style query syntax for `/tables/{table}/get` (filters, aggregates, `_TABLE` FK traversal rules, common errors and fixes)
 - **[Ministry Platform Date/Time Handling](.claude/references/ministryplatform.datetimehandling.md)** - How to send/receive MP datetimes safely via `DomainTimezoneService`, anti-patterns, Windows↔IANA mapping, and test guidance
 - **[Testing Reference](.claude/references/testing.md)** - Vitest setup, mock patterns (`vi.hoisted`, MPHelper, auth), coverage data, and test file inventory
+- **[Security Headers](.claude/references/security-headers.md)** - CSP (nonce-based, report-only until `CSP_ENFORCE=true`), why nonces force dynamic rendering, and the deliberate loosenings not to "tighten"
 
 <!-- BEGIN:nextjs-agent-rules -->
 

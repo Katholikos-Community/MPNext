@@ -11,6 +11,16 @@ import { handleSignOut } from "@/components/user-menu/actions";
  * It lives outside the (web) route group, so it is NOT wrapped by AuthWrapper
  * and cannot cause a redirect loop.
  */
+/**
+ * Rendered per request, never prerendered (F9).
+ *
+ * Same reason as `src/app/signin/page.tsx`: the nonce-based CSP in
+ * `src/proxy.ts` can only be applied to a page Next renders per request, and
+ * this page's whole purpose is a sign-out button that must work for a user
+ * already stuck in a broken session.
+ */
+export const dynamic = "force-dynamic";
+
 export default function SessionErrorPage() {
   return (
     <div className="flex items-center justify-center min-h-screen px-4">
