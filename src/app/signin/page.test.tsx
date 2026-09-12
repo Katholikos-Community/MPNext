@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { use } from "react";
+import { StrictMode, use } from "react";
 
 /**
  * /signin page tests.
@@ -141,10 +141,33 @@ describe("/signin page", () => {
   it("does not start a second sign-in when the effect re-runs", async () => {
     render(<SignIn />);
 
-    // Setting isRedirecting is itself an effect dependency, so the effect runs
-    // again and calls getSession a second time; the latch must stop it there.
-    await waitFor(() => expect(mockGetSession).toHaveBeenCalledTimes(2));
+    // The ref guard is set synchronously on the first run, so a re-run returns
+    // before it touches the network at all — getSession included.
     await waitFor(() => expect(mockSignInSocial).toHaveBeenCalledTimes(1));
+    expect(mockGetSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts exactly one OAuth flow under StrictMode's double-invoked effects", async () => {
+    // The regression test for the real outage. React StrictMode double-invokes
+    // effects in dev, and the old guard — a useState flag read inside the
+    // getSession() callback, with the state in the effect's dep array — could
+    // not stop it: both runs reached the async callback with `false` captured
+    // in their closure, so both called signIn.social(). The server log showed
+    // two POST /api/auth/sign-in/social on every attempt.
+    //
+    // Each call mints its own state and id_token nonce and overwrites the one
+    // `oauth_state` cookie better-auth validates the callback against, so the
+    // two flows raced and sign-in failed intermittently with
+    // `unable_to_get_user_info` — the id_token's nonce belonging to the flow
+    // that lost.
+    render(
+      <StrictMode>
+        <SignIn />
+      </StrictMode>
+    );
+
+    await waitFor(() => expect(mockSignInSocial).toHaveBeenCalledTimes(1));
+    expect(mockGetSession).toHaveBeenCalledTimes(1);
   });
 
   it("shows the loading fallback while the search params are still suspended", () => {
