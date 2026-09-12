@@ -327,6 +327,396 @@ describe("ContactLogs", () => {
       expect(onRefresh).not.toHaveBeenCalled();
     });
   });
+  // ---------------------------------------------------------------------------
+  // Coverage-driven cases. The blocks above encode the safety guarantees; these
+  // exercise the remaining rendering, cancellation and fallback paths so a
+  // regression in any of them fails a test rather than reaching a real contact.
+  // ---------------------------------------------------------------------------
+
+  /** A promise whose settlement the test controls, for in-flight assertions. */
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  /** Renders, opens the edit dialog for the first log row, returns its scope. */
+  async function openEditDialog(
+    overrides: Partial<Parameters<typeof ContactLogs>[0]> = {}
+  ) {
+    renderLogs(overrides);
+    fireEvent.click(screen.getAllByRole("button", { name: /^edit$/i })[0]);
+    return within(await screen.findByRole("dialog"));
+  }
+
+  describe("log entry rendering", () => {
+    const variedLogs: ContactLogDisplay[] = [
+      {
+        Contact_Log_ID: 601,
+        Contact_ID: 42,
+        Contact_Date: "2026-08-21T09:00:00",
+        Notes: "Sent the welcome email.",
+        Contact_Log_Type: "Email",
+        Contact_Log_Type_ID: 2,
+        Made_By: 1,
+        // No nickname — the byline falls back to the first name.
+        MadeByContact: [
+          {
+            Contact_ID: 1,
+            First_Name: "Alex",
+            Nickname: null,
+            Last_Name: "Kim",
+            Email_Address: null,
+            Mobile_Phone: null,
+            Image_GUID: null,
+          },
+        ],
+      },
+      {
+        Contact_Log_ID: 602,
+        Contact_ID: 42,
+        Contact_Date: "2026-08-22T10:15:00",
+        Notes: "Met after the service.",
+        Contact_Log_Type: "Meeting",
+        Contact_Log_Type_ID: 3,
+        Made_By: 1,
+        MadeByContact: [],
+      },
+      {
+        Contact_Log_ID: 603,
+        Contact_ID: 42,
+        Contact_Date: "2026-08-23T11:00:00",
+        Notes: "Dropped by the house.",
+        Contact_Log_Type: "Visit",
+        Contact_Log_Type_ID: 4,
+        Made_By: 1,
+      },
+      {
+        Contact_Log_ID: 604,
+        Contact_ID: 42,
+        Contact_Date: "2026-08-24T12:00:00",
+        Notes: "Coffee downtown.",
+        Contact_Log_Type: "Coffee",
+        Contact_Log_Type_ID: 99,
+        Made_By: 1,
+      },
+      {
+        Contact_Log_ID: 605,
+        Contact_ID: 42,
+        Contact_Date: "2026-08-25T13:00:00",
+        // A log MP left untyped, with no notes.
+        Notes: "",
+        Contact_Log_Type: null,
+        Contact_Log_Type_ID: null,
+        Made_By: 1,
+      },
+    ];
+
+    it("labels every log type, including unrecognised and missing ones", () => {
+      renderLogs({ contactLogs: variedLogs });
+
+      expect(screen.getByText(/Contact Logs \(5\)/)).toBeInTheDocument();
+      for (const label of ["Email", "Meeting", "Visit", "Coffee"]) {
+        expect(screen.getByText(label)).toBeInTheDocument();
+      }
+      // A null type is shown as "Unknown" rather than an empty badge.
+      expect(screen.getByText("Unknown")).toBeInTheDocument();
+    });
+
+    it("falls back to the first name when the author has no nickname", () => {
+      renderLogs({ contactLogs: variedLogs });
+
+      expect(screen.getByText("Alex Kim")).toBeInTheDocument();
+    });
+
+    it("renders rows with no author and rows with no notes", () => {
+      renderLogs({ contactLogs: variedLogs });
+
+      // 602 has an empty author array, 603 has none at all — neither should
+      // render a byline, and the empty-notes row should render no note text.
+      expect(screen.getByText("Met after the service.")).toBeInTheDocument();
+      expect(screen.getByText("Dropped by the house.")).toBeInTheDocument();
+      expect(screen.getAllByRole("button", { name: /^edit$/i })).toHaveLength(5);
+    });
+  });
+
+  describe("date rendering", () => {
+    const withDate = (date: string): ContactLogDisplay[] => [
+      { ...logs[0], Contact_Date: date },
+    ];
+
+    it("renders an MP wall-clock datetime in the MP time zone", () => {
+      renderLogs({ contactLogs: withDate("2026-08-20T14:30:00") });
+
+      expect(screen.getByText("Aug 20, 2026, 2:30 PM")).toBeInTheDocument();
+    });
+
+    it("falls back to Date parsing for a value carrying a UTC offset", () => {
+      // Not MP's usual shape, but it must not render garbage: 18:30Z is
+      // 2:30 PM in America/New_York.
+      renderLogs({ contactLogs: withDate("2026-08-20T18:30:00+00:00") });
+
+      expect(screen.getByText("Aug 20, 2026, 2:30 PM")).toBeInTheDocument();
+    });
+
+    it("renders a date-only value at midnight MP time", () => {
+      renderLogs({ contactLogs: withDate("2026-08-22") });
+
+      expect(screen.getByText("Aug 22, 2026, 12:00 AM")).toBeInTheDocument();
+    });
+
+    it("prefills the edit form with midnight for a date-only value", async () => {
+      const form = await openEditDialog({ contactLogs: withDate("2026-08-22") });
+
+      expect(form.getByLabelText(/contact date/i)).toHaveValue("2026-08-22T00:00");
+    });
+  });
+
+  describe("cancel and dismissal paths", () => {
+    it("closes the create dialog without calling createContactLog", async () => {
+      const form = await openCreateDialog();
+      fireEvent.change(form.getByLabelText(/notes/i), {
+        target: { value: "Typed but abandoned." },
+      });
+
+      fireEvent.click(form.getByRole("button", { name: /cancel/i }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+      expect(mockCreateContactLog).not.toHaveBeenCalled();
+    });
+
+    it("discards the typed note when the create dialog is reopened", async () => {
+      const form = await openCreateDialog();
+      fireEvent.change(form.getByLabelText(/notes/i), {
+        target: { value: "Typed but abandoned." },
+      });
+      fireEvent.click(form.getByRole("button", { name: /cancel/i }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: /add log/i }));
+      const reopened = within(await screen.findByRole("dialog"));
+
+      expect(reopened.getByLabelText(/notes/i)).toHaveValue("");
+      expect(mockCreateContactLog).not.toHaveBeenCalled();
+    });
+
+    it("closes the edit dialog without calling updateContactLog", async () => {
+      const form = await openEditDialog();
+
+      fireEvent.click(form.getByRole("button", { name: /cancel/i }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+      expect(mockUpdateContactLog).not.toHaveBeenCalled();
+    });
+
+    it("opens the create dialog from the empty state without calling any action", async () => {
+      renderLogs({ contactLogs: [] });
+
+      fireEvent.click(screen.getByRole("button", { name: /add log/i }));
+
+      const dialog = await screen.findByRole("dialog");
+      expect(
+        within(dialog).getByText(/Create New Contact Log - Sam Ortiz/)
+      ).toBeInTheDocument();
+      expect(mockCreateContactLog).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("in-flight state", () => {
+    it("disables the create button and shows progress while the action runs", async () => {
+      const pending = deferred<{ Contact_Log_ID: number }>();
+      mockCreateContactLog.mockReturnValueOnce(pending.promise);
+      const form = await openCreateDialog();
+
+      fireEvent.change(form.getByLabelText(/notes/i), {
+        target: { value: "A note." },
+      });
+      fireEvent.click(form.getByRole("button", { name: /create log/i }));
+
+      const busy = await screen.findByRole("button", { name: /creating/i });
+      expect(busy).toBeDisabled();
+      // A second click while in flight must not queue a second write.
+      fireEvent.click(busy);
+      expect(mockCreateContactLog).toHaveBeenCalledTimes(1);
+
+      pending.resolve({ Contact_Log_ID: 900 });
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+    });
+
+    it("disables the save button and shows progress while the update runs", async () => {
+      const pending = deferred<{ Contact_Log_ID: number }>();
+      mockUpdateContactLog.mockReturnValueOnce(pending.promise);
+      const form = await openEditDialog();
+
+      fireEvent.click(form.getByRole("button", { name: /save changes/i }));
+
+      const busy = await screen.findByRole("button", { name: /saving/i });
+      expect(busy).toBeDisabled();
+      fireEvent.click(busy);
+      expect(mockUpdateContactLog).toHaveBeenCalledTimes(1);
+
+      pending.resolve({ Contact_Log_ID: 501 });
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+    });
+  });
+
+  describe("log type selection", () => {
+    it("sends the ID of the log type chosen in the dropdown", async () => {
+      mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 901 });
+      const form = await openCreateDialog();
+      await waitFor(() => expect(mockGetContactLogTypes).toHaveBeenCalled());
+
+      await selectLogType(form, "Phone Call");
+      fireEvent.change(form.getByLabelText(/notes/i), {
+        target: { value: "Rang twice." },
+      });
+      fireEvent.click(form.getByRole("button", { name: /create log/i }));
+
+      await waitFor(() => expect(mockCreateContactLog).toHaveBeenCalledTimes(1));
+      expect(mockCreateContactLog).toHaveBeenCalledWith(
+        expect.objectContaining({ Contact_Log_Type_ID: 1 })
+      );
+    });
+
+    it("sends a null type ID when the log's type is not in the fetched list", async () => {
+      mockUpdateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 501 });
+      const form = await openEditDialog({
+        contactLogs: [
+          { ...logs[0], Contact_Log_Type: "Email", Contact_Log_Type_ID: 2 },
+        ],
+      });
+
+      fireEvent.click(form.getByRole("button", { name: /save changes/i }));
+
+      await waitFor(() => expect(mockUpdateContactLog).toHaveBeenCalledTimes(1));
+      expect(mockUpdateContactLog).toHaveBeenCalledWith(
+        501,
+        expect.objectContaining({ Contact_Log_Type_ID: null })
+      );
+    });
+  });
+
+  describe("optional props and fallbacks", () => {
+    it("labels the dialog generically when no name is supplied", async () => {
+      const form = await openCreateDialog({
+        contactNickname: undefined,
+        contactLastName: undefined,
+      });
+
+      expect(form.getByText(/Create New Contact Log - Contact/)).toBeInTheDocument();
+    });
+
+    it("completes a create when no onRefresh callback is provided", async () => {
+      mockCreateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 902 });
+      const form = await openCreateDialog();
+
+      fireEvent.change(form.getByLabelText(/notes/i), {
+        target: { value: "No refresh handler." },
+      });
+      fireEvent.click(form.getByRole("button", { name: /create log/i }));
+
+      await waitFor(() => expect(mockCreateContactLog).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+    });
+
+    it("completes an update when no onRefresh callback is provided", async () => {
+      mockUpdateContactLog.mockResolvedValueOnce({ Contact_Log_ID: 501 });
+      const form = await openEditDialog();
+
+      fireEvent.click(form.getByRole("button", { name: /save changes/i }));
+
+      await waitFor(() => expect(mockUpdateContactLog).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+    });
+
+    it("completes a delete when no onRefresh callback is provided", async () => {
+      mockDeleteContactLog.mockResolvedValueOnce(undefined);
+      renderLogs();
+
+      clickDeleteIcon();
+      const dialog = await screen.findByRole("alertdialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+      await waitFor(() => expect(mockDeleteContactLog).toHaveBeenCalledWith(501));
+      expect(alertSpy).not.toHaveBeenCalled();
+    });
+
+    it("prefills empty strings for a log with no notes and no type", async () => {
+      const form = await openEditDialog({
+        contactLogs: [
+          {
+            ...logs[0],
+            Notes: "",
+            Contact_Log_Type: null,
+            Contact_Log_Type_ID: null,
+          },
+        ],
+      });
+
+      expect(form.getByLabelText(/notes/i)).toHaveValue("");
+      // Nothing chosen, so the placeholder is still showing.
+      expect(form.getByText("Select log type")).toBeInTheDocument();
+    });
+
+    it("falls back to a generic message when the update rejects with a non-Error", async () => {
+      mockUpdateContactLog.mockRejectedValueOnce("boom");
+      const form = await openEditDialog();
+
+      fireEvent.click(form.getByRole("button", { name: /save changes/i }));
+
+      await waitFor(() =>
+        expect(alertSpy).toHaveBeenCalledWith("Error: Failed to update contact log")
+      );
+    });
+
+    it("falls back to a generic message when the delete rejects with a non-Error", async () => {
+      mockDeleteContactLog.mockRejectedValueOnce("boom");
+      renderLogs();
+
+      clickDeleteIcon();
+      const dialog = await screen.findByRole("alertdialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+      await waitFor(() =>
+        expect(alertSpy).toHaveBeenCalledWith("Error: Failed to delete contact log")
+      );
+    });
+
+    it("does not delete when the confirmed log has a falsy ID", async () => {
+      // Contact_Log_ID 0 is not a real MP key, but the guard in confirmDelete is
+      // a falsy check rather than a null check — this pins that behaviour so the
+      // guard cannot silently start deleting an unintended record.
+      renderLogs({ contactLogs: [{ ...logs[0], Contact_Log_ID: 0 }] });
+
+      clickDeleteIcon();
+      const dialog = await screen.findByRole("alertdialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
+      );
+      expect(mockDeleteContactLog).not.toHaveBeenCalled();
+    });
+  });
+
 });
 
 /**
@@ -340,4 +730,22 @@ function clickDeleteIcon() {
   );
   if (!deleteButton) throw new Error("delete button not found");
   fireEvent.click(deleteButton);
+}
+
+/**
+ * Opens the Radix Select for log type and picks an option by its label.
+ * jsdom does not implement PointerEvent, so Radix never sees the pointer press
+ * that opens the listbox in a browser; the keyboard path it also supports is
+ * driven instead.
+ */
+async function selectLogType(
+  form: ReturnType<typeof within>,
+  label: string
+) {
+  fireEvent.keyDown(form.getByRole("combobox"), { key: "ArrowDown" });
+  const option = await screen.findByRole("option", { name: label });
+  fireEvent.keyDown(option, { key: "Enter" });
+  await waitFor(() =>
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument()
+  );
 }

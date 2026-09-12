@@ -37,15 +37,31 @@ export default defineConfig({
         'src/components/ui/',
       ],
 
-      // Ratchet for non-UI functional code: services, the MP provider, server
-      // actions, contexts, and auth/proxy plumbing. Set just under the achieved
-      // figures (98.8% stmts / 94.5% branch / 97.6% funcs / 99.0% lines) so an
-      // ordinary refactor has room but a real regression fails the run.
+      // Ratchet, set just under the achieved figures so an ordinary refactor has
+      // room but a real regression fails the run. Every threshold key below is a
+      // glob whose matching files are aggregated into one set; the bare
+      // statements/branches/functions/lines keys at the bottom are the GLOBAL
+      // gate, which Vitest applies to all files — including ones a glob already
+      // matched — not just the leftovers.
       //
-      // React components and app routes are deliberately NOT gated: they are
-      // excluded from these globs rather than from the report, so `npm run
-      // test:coverage` still shows their (currently 0%) numbers.
+      // UI is now gated too. React components and app routes were ungated while
+      // they sat at 0%; as of 2026-09-12 they are covered (app routes 100%,
+      // components 98.9% stmts / 96.6% branch), so they get globs of their own.
+      // Keep branch gates on small denominators loose: `src/app/**` has only 10
+      // branches total, where a single uncovered one costs 10 points.
       thresholds: {
+        'src/app/**': {
+          statements: 95,
+          branches: 90,
+          functions: 95,
+          lines: 95,
+        },
+        'src/components/**/*.tsx': {
+          statements: 95,
+          branches: 90,
+          functions: 95,
+          lines: 95,
+        },
         'src/services/**': {
           statements: 95,
           branches: 90,
@@ -76,6 +92,16 @@ export default defineConfig({
           functions: 100,
           lines: 100,
         },
+
+        // Global gate across everything in `include`. Achieved 2026-09-12:
+        // 99.45% stmts / 97.02% branch / 98.86% funcs / 99.71% lines. This is
+        // the backstop that catches a newly added, entirely untested file —
+        // the per-glob gates above cannot, since a new file lands inside a glob
+        // and is diluted by everything already covered there.
+        statements: 98,
+        branches: 95,
+        functions: 97,
+        lines: 98,
       },
     },
   },
