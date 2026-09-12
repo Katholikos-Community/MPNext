@@ -125,6 +125,21 @@ describe('proxy', () => {
         expect.objectContaining({ pathname: '/signin' })
       );
     });
+
+    it('should redirect to /signin when a non-Error value is thrown during session check', async () => {
+      // Covers the non-Error arm of the safe-error-logging ternary in the
+      // catch block (F5 — logging must never dump a raw, unshaped value).
+      const request = createMockRequest('/home');
+      mockGetSessionCookie.mockImplementationOnce(() => {
+        throw 'not an Error instance';
+      });
+
+      await proxy(request);
+
+      expect(mockRedirect).toHaveBeenCalledWith(
+        expect.objectContaining({ pathname: '/signin' })
+      );
+    });
   });
 
   describe('Route Matcher', () => {

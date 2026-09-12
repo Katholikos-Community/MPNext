@@ -199,8 +199,6 @@ export function ContactLogs({
         Feedback_Entry_ID: null,
       };
 
-      console.log("Creating contact log with data:", contactLogData);
-      
       await createContactLog(contactLogData);
 
       setIsCreateModalOpen(false);
@@ -211,8 +209,8 @@ export function ContactLogs({
       }
 
     } catch (err) {
-      console.error("Error creating contact log:", err);
       const errorMessage = err instanceof Error ? err.message : "Failed to create contact log";
+      console.error("Error creating contact log:", errorMessage);
       alert(`Error: ${errorMessage}`);
     } finally {
       setIsCreating(false);
@@ -233,8 +231,6 @@ export function ContactLogs({
         Contact_Log_Type_ID: selectedLogType?.Contact_Log_Type_ID || null,
       };
 
-      console.log("Updating contact log with data:", contactLogData);
-      
       await updateContactLog(editingLog.Contact_Log_ID, contactLogData);
       
       setIsEditModalOpen(false);
@@ -245,8 +241,8 @@ export function ContactLogs({
         onRefresh();
       }
     } catch (err) {
-      console.error("Error updating contact log:", err);
       const errorMessage = err instanceof Error ? err.message : "Failed to update contact log";
+      console.error("Error updating contact log:", errorMessage);
       alert(`Error: ${errorMessage}`);
     } finally {
       setIsEditing(false);
@@ -281,8 +277,8 @@ export function ContactLogs({
         onRefresh();
       }
     } catch (err) {
-      console.error("Error deleting contact log:", err);
       const errorMessage = err instanceof Error ? err.message : "Failed to delete contact log";
+      console.error("Error deleting contact log:", errorMessage);
       alert(`Error: ${errorMessage}`);
     } finally {
       setIsDeleting(false);

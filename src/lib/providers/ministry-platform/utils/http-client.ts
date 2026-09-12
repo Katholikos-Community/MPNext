@@ -21,14 +21,13 @@ export class HttpClient {
         });
 
         if (!response.ok) {
-            const responseText = await response.text().catch(() => '');
             console.error("GET Request failed:", {
+                method: 'GET',
+                endpoint,
                 status: response.status,
-                statusText: response.statusText,
-                url,
-                responseBody: responseText
+                statusText: response.statusText
             });
-            throw new Error(`GET ${endpoint} failed: ${response.status} ${response.statusText}${responseText ? ` - ${responseText}` : ''}`);
+            throw new Error(`GET ${endpoint} failed: ${response.status} ${response.statusText}`);
         }
 
         return await response.json() as T;
@@ -76,14 +75,7 @@ export class HttpClient {
 
     async put<T = unknown>(endpoint: string, body: RequestBody, queryParams?: QueryParams): Promise<T> {
         const url = this.buildUrl(endpoint, queryParams);
-        
-        console.log("HTTP PUT Request:", {
-            url,
-            endpoint,
-            body: JSON.stringify(body, null, 2),
-            queryParams
-        });
-        
+
         const response = await fetch(url, {
             method: 'PUT',
             headers: {
@@ -95,11 +87,11 @@ export class HttpClient {
         });
 
         if (!response.ok) {
-            const responseText = await response.text();
             console.error("PUT Request failed:", {
+                method: 'PUT',
+                endpoint,
                 status: response.status,
-                statusText: response.statusText,
-                responseBody: responseText
+                statusText: response.statusText
             });
             throw new Error(`PUT ${endpoint} failed: ${response.status} ${response.statusText}`);
         }

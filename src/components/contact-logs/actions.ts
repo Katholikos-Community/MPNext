@@ -78,12 +78,9 @@ export async function createContactLog(
       Made_By: userId,
     };
 
-    console.log("createContactLog action - Creating with data:", JSON.stringify(logDataWithUser, null, 2));
-
     const contactLogService = await ContactLogService.getInstance();
     const contactLog = await contactLogService.createContactLog(logDataWithUser);
 
-    console.log("createContactLog action - Successfully created");
     return contactLog;
   } catch (error) {
     console.error("Error creating contact log:", error);
@@ -109,13 +106,9 @@ export async function updateContactLog(
     // Under this policy any role-holder may edit anyone's log, so stamping the
     // editor would rewrite the pastoral record's authorship. MP's audit trail
     // already captures the editor via `$userId` in ContactLogService.
-    console.log("updateContactLog action - Updating log:", logId);
-    console.log("updateContactLog action - Update data:", JSON.stringify(contactLogData, null, 2));
-
     const contactLogService = await ContactLogService.getInstance();
     const contactLog = await contactLogService.updateContactLog(logId, contactLogData);
 
-    console.log("updateContactLog action - Successfully updated");
     return contactLog;
   } catch (error) {
     console.error("Error updating contact log:", error);
@@ -129,12 +122,8 @@ export async function deleteContactLog(contactLogId: number): Promise<void> {
 
     const logId = sanitizeNumericId(contactLogId, "Contact Log ID");
 
-    console.log("deleteContactLog action - Deleting log:", logId);
-
     const contactLogService = await ContactLogService.getInstance();
     await contactLogService.deleteContactLog(logId);
-
-    console.log("deleteContactLog action - Successfully deleted");
   } catch (error) {
     console.error("Error deleting contact log:", error);
     throw error instanceof Error ? error : new Error("Failed to delete contact log");

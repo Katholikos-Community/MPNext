@@ -10,7 +10,6 @@ export async function proxy(request: NextRequest) {
   // `/signin`, which immediately restarts OAuth — a loop that never lets the
   // user see why sign-in failed.
   if (pathname.startsWith('/api') || pathname === '/signin' || pathname === '/auth-error') {
-    console.log(`Proxy: Allowing public path ${pathname}`);
     return NextResponse.next();
   }
 
@@ -18,15 +17,16 @@ export async function proxy(request: NextRequest) {
     const sessionCookie = getSessionCookie(request);
 
     if (!sessionCookie) {
-      console.log("Proxy: Redirecting to signin - no session cookie");
       return NextResponse.redirect(new URL('/signin', request.url));
     }
 
-    console.log(`Proxy: Allowing request to ${pathname}`);
     return NextResponse.next();
 
   } catch (error) {
-    console.error('Proxy: Error checking session:', error);
+    console.error(
+      'Proxy: error checking session',
+      error instanceof Error ? error.message : String(error)
+    );
     return NextResponse.redirect(new URL('/signin', request.url));
   }
 }

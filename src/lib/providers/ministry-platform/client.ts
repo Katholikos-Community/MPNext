@@ -44,14 +44,8 @@ export class MinistryPlatformClient {
      * @throws Error if token refresh fails
      */
     public async ensureValidToken(): Promise<void> {
-        console.log("Checking token validity...");
-        console.log("Expires at: ", this.expiresAt);
-        console.log("Current time: ", new Date());
-
         // Check if token is expired or about to expire
         if (this.expiresAt < new Date()) {
-            console.log("Token expired, refreshing...");
-            
             try {
                 // Get new access token using client credentials flow
                 const creds = await getClientCredentialsToken();
@@ -67,10 +61,8 @@ export class MinistryPlatformClient {
                 this.expiresAt = new Date(
                     Date.now() + Math.max(lifetimeMs - TOKEN_SAFETY_MARGIN, MIN_TOKEN_LIFETIME)
                 );
-                
-                console.log("Token refreshed. Expires at: ", this.expiresAt);
             } catch (error) {
-                console.error("Failed to refresh token:", error);
+                console.error("Failed to refresh MP access token:", error);
                 throw error;
             }
         }

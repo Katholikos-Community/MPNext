@@ -346,4 +346,67 @@ describe('TableService', () => {
       expect(mockClient.ensureValidToken).toHaveBeenCalledTimes(4);
     });
   });
+
+  describe('Logging safety (F5)', () => {
+    // Member PII and pastoral notes must never reach info-level logs. See
+    // .claude/references/auth.md § Logging policy.
+    let logSpy: ReturnType<typeof vi.spyOn>;
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    it('should not log anything when fetching records succeeds', async () => {
+      const sensitiveRecords = [
+        { Contact_ID: 1, Display_Name: 'Jane Doe', Notes: 'Struggling with grief after a loss' },
+      ];
+      (mockHttpClient.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sensitiveRecords);
+
+      await tableService.getTableRecords('Contact_Log', {
+        $filter: "Notes LIKE '%grief%'",
+      });
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('should not include the $filter value or record content in the failure log', async () => {
+      (mockHttpClient.get as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('GET /tables/Contact_Log failed: 500 Internal Server Error')
+      );
+
+      await expect(
+        tableService.getTableRecords('Contact_Log', {
+          $filter: "Notes LIKE '%grief%' AND Display_Name = 'Jane Doe'",
+        })
+      ).rejects.toThrow();
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const loggedArgs = errorSpy.mock.calls[0].map(String).join(' ');
+      expect(loggedArgs).not.toContain('grief');
+      expect(loggedArgs).not.toContain('Jane Doe');
+      expect(loggedArgs).not.toContain('$filter');
+    });
+
+    it('should not log request records when creating fails', async () => {
+      (mockHttpClient.post as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('POST /tables/Contact_Log failed: 400 Bad Request')
+      );
+
+      await expect(
+        tableService.createTableRecords('Contact_Log', [
+          { Notes: 'Confidential pastoral note' },
+        ])
+      ).rejects.toThrow();
+
+      expect(logSpy).not.toHaveBeenCalled();
+      const loggedArgs = errorSpy.mock.calls
+        .map((args: unknown[]) => args.map(String).join(' '))
+        .join(' ');
+      expect(loggedArgs).not.toContain('Confidential pastoral note');
+    });
+  });
 });

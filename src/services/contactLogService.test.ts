@@ -595,4 +595,62 @@ describe('ContactLogService', () => {
       expect(mockGetTableRecords).not.toHaveBeenCalled();
     });
   });
+
+  describe('Logging safety (F5)', () => {
+    // Pastoral notes must never reach info-level logs. See
+    // .claude/references/auth.md § Logging policy.
+    let logSpy: ReturnType<typeof vi.fn>;
+    let errorSpy: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    const sensitiveNotes = 'Confidential: disclosed a personal crisis in confidence';
+
+    it('should not log Notes when creating a contact log', async () => {
+      mockCreateTableRecords.mockResolvedValueOnce([{ Contact_Log_ID: 1, Contact_ID: 42 }]);
+
+      const service = await ContactLogService.getInstance();
+      await service.createContactLog({
+        Contact_ID: 42,
+        Contact_Date: '2026-05-17',
+        Contact_Log_Type_ID: 1,
+        Made_By: 100,
+        Notes: sensitiveNotes,
+        Planned_Contact_ID: null,
+        Contact_Successful: null,
+        Original_Contact_Log_Entry: null,
+        Feedback_Entry_ID: null,
+      });
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('should not log Notes when updating a contact log, even on failure', async () => {
+      mockUpdateTableRecords.mockRejectedValueOnce(new Error('Record not found'));
+
+      const service = await ContactLogService.getInstance();
+      await expect(
+        service.updateContactLog(1, { Notes: sensitiveNotes })
+      ).rejects.toThrow('Record not found');
+
+      expect(logSpy).not.toHaveBeenCalled();
+      // This method has no catch block of its own (the error propagates to the
+      // action layer), so nothing here should log at all.
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('should not log anything when deleting a contact log', async () => {
+      mockDeleteTableRecords.mockResolvedValueOnce(undefined);
+
+      const service = await ContactLogService.getInstance();
+      await service.deleteContactLog(42);
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+  });
 });

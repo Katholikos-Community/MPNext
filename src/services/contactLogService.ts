@@ -170,8 +170,6 @@ export class ContactLogService {
   public async createContactLog(
     contactLogData: Omit<ContactLogInput, 'Contact_Log_ID'>,
   ): Promise<ContactLog> {
-    console.log('ContactLogService.createContactLog - Creating with data:', JSON.stringify(contactLogData, null, 2));
-
     // Validate non-date fields with the generated schema; Contact_Date is
     // handled separately by DomainTimezoneService since the generated schema
     // expects ISO and MP needs SQL wall-clock in the domain time zone.
@@ -182,7 +180,6 @@ export class ContactLogService {
 
     const tz = DomainTimezoneService.getInstance();
     const mpDate = await tz.toMpSqlDatetime(Contact_Date);
-    console.log('ContactLogService.createContactLog - MP-TZ SQL date:', mpDate);
 
     const $userId = await AuthorizationService.getInstance().requireSecurityRole({
       table: "Contact_Log",
@@ -214,9 +211,6 @@ export class ContactLogService {
     contactLogId: number,
     contactLogData: Partial<Omit<ContactLogInput, 'Contact_Log_ID'>>
   ): Promise<ContactLog> {
-    console.log('ContactLogService.updateContactLog - Updating log:', contactLogId);
-    console.log('ContactLogService.updateContactLog - Update data:', JSON.stringify(contactLogData, null, 2));
-
     const { Contact_Date, ...rest } = contactLogData;
     const validatedRest = ContactLogSchema
       .omit({ Contact_Log_ID: true, Contact_Date: true })
@@ -227,7 +221,6 @@ export class ContactLogService {
     if (Contact_Date !== undefined && Contact_Date !== null) {
       const tz = DomainTimezoneService.getInstance();
       mpDate = await tz.toMpSqlDatetime(Contact_Date);
-      console.log('ContactLogService.updateContactLog - MP-TZ SQL date:', mpDate);
     }
 
     const updateData = {
@@ -262,15 +255,11 @@ export class ContactLogService {
    * @throws UnauthorizedError when the caller holds no MP security role
    */
   public async deleteContactLog(contactLogId: number): Promise<void> {
-    console.log('ContactLogService.deleteContactLog - Deleting log:', contactLogId);
-
     const $userId = await AuthorizationService.getInstance().requireSecurityRole({
       table: "Contact_Log",
       operation: "delete",
     });
 
     await this.mp!.deleteTableRecords("Contact_Log", [contactLogId], { $userId });
-    
-    console.log('ContactLogService.deleteContactLog - Successfully deleted');
   }
 }

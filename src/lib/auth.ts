@@ -84,7 +84,10 @@ async function resolveMpUserId(userGuid: string): Promise<number | null> {
   } catch (err) {
     // Never block session creation on this — the NonUser Write warning at
     // write time will surface the missing attribution.
-    console.error("[customSession] resolveMpUserId failed", { userGuid, err });
+    console.error("[customSession] resolveMpUserId failed", {
+      userGuid,
+      err: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }

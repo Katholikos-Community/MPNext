@@ -478,4 +478,85 @@ describe('HttpClient', () => {
       expect(result[0].Display_Name).toBe('Test');
     });
   });
+
+  describe('Logging safety (F5)', () => {
+    // Member PII and pastoral notes must never reach info-level logs, and a
+    // failure log/message must never echo the query string ($filter) or the
+    // response body. See .claude/references/auth.md § Logging policy.
+    let logSpy: ReturnType<typeof vi.fn>;
+    let errorSpy: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    it('should not log anything on a successful GET', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve([{ Contact_ID: 1, Notes: 'Pastoral note' }]),
+      });
+
+      await httpClient.get('/tables/Contact_Log');
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('should not log the response body or the full URL/query string on a failed GET', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        text: () => Promise.resolve('Notes: "Confidential pastoral note", Display_Name: "Jane Doe"'),
+      });
+
+      await expect(
+        httpClient.get('/tables/Contact_Log', { $filter: "Notes LIKE '%grief%'" })
+      ).rejects.toThrow('GET /tables/Contact_Log failed: 500 Internal Server Error');
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const loggedArgs = errorSpy.mock.calls[0].map((a) => JSON.stringify(a)).join(' ');
+      expect(loggedArgs).not.toContain('Confidential pastoral note');
+      expect(loggedArgs).not.toContain('Jane Doe');
+      expect(loggedArgs).not.toContain('grief');
+      expect(loggedArgs).not.toContain('$filter');
+    });
+
+    it('should not include the response body in the thrown error message on a failed GET', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        text: () => Promise.resolve('Notes: "Confidential pastoral note"'),
+      });
+
+      try {
+        await httpClient.get('/tables/Contact_Log');
+        expect.unreachable('expected httpClient.get to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).not.toContain('Confidential pastoral note');
+        expect((err as Error).message).toBe('GET /tables/Contact_Log failed: 400 Bad Request');
+      }
+    });
+
+    it('should not log the request body or response body on a failed PUT', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        text: () => Promise.resolve('Notes: "Confidential pastoral note"'),
+      });
+
+      await expect(
+        httpClient.put('/tables/Contact_Log', { Notes: 'Confidential pastoral note' })
+      ).rejects.toThrow('PUT /tables/Contact_Log failed: 400 Bad Request');
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const loggedArgs = errorSpy.mock.calls[0].map((a) => JSON.stringify(a)).join(' ');
+      expect(loggedArgs).not.toContain('Confidential pastoral note');
+    });
+  });
 });
