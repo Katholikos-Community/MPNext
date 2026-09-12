@@ -4,9 +4,28 @@ import { useEffect, useState, Suspense } from "react";
 import { authClient } from "@/lib/auth-client";
 import { useSearchParams } from "next/navigation";
 
+/**
+ * Reduces a `callbackUrl` query parameter to a safe, same-origin destination.
+ *
+ * F3 (2026-09-12): the raw parameter was assigned straight to
+ * `window.location.href` for an already-signed-in visitor, which made /signin an
+ * open redirect — `?callbackUrl=https://evil.example` sent the user off-site
+ * from a URL that looks like this app's own login. Only a relative path rooted
+ * at `/` is honored; everything else falls back to `/`.
+ *
+ * The three rejected shapes that matter: an absolute URL (`https://evil…`), a
+ * protocol-relative URL (`//evil…`, which the browser resolves as another
+ * origin), and `/\evil…`, which browsers normalize to `//evil…`.
+ */
+function sanitizeCallbackUrl(raw: string | null | undefined): string {
+  if (!raw || !raw.startsWith("/")) return "/";
+  if (raw.startsWith("//") || raw.startsWith("/\\")) return "/";
+  return raw;
+}
+
 function SignInContent() {
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams?.get("callbackUrl") || "/";
+  const callbackUrl = sanitizeCallbackUrl(searchParams?.get("callbackUrl"));
   const [isRedirecting, setIsRedirecting] = useState(false);
 
   console.log("SignIn Page rendered with callbackUrl:", callbackUrl);

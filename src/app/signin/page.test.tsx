@@ -20,6 +20,9 @@ import { use } from "react";
  * - The `isRedirecting` latch must survive the effect re-running (setting the
  *   state re-triggers the effect via its own dep array) or the page fires a
  *   second sign-in mid-navigation.
+ * - `callbackUrl` is attacker-controlled and lands in `window.location.href`,
+ *   so it must be reduced to a same-origin relative path first (F3,
+ *   2026-09-12). The open-redirect cases are covered in their own block below.
  *
  * `authClient` is mocked throughout — no test here may reach a real auth
  * endpoint or the Ministry Platform identity server.
@@ -158,5 +161,104 @@ describe("/signin page", () => {
     expect(screen.getByRole("heading", { name: /loading/i })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /redirecting/i })).toBeNull();
     expect(mockGetSession).not.toHaveBeenCalled();
+  });
+
+  /**
+   * F3 (2026-09-12) — open redirect.
+   *
+   * `callbackUrl` comes from the query string and was assigned straight to
+   * `window.location.href` for an already-signed-in visitor, so a link to
+   * `/signin?callbackUrl=https://evil.example` bounced the user off-site from a
+   * URL that looks like this app's own login page. Only a relative path rooted
+   * at `/` is honored now.
+   *
+   * Both sinks are asserted, because sanitizing one is not enough: the
+   * `location.href` assignment (no server involved at all) and the
+   * `callbackURL` handed to `signIn.social` (which better-auth also validates
+   * server-side, but defence in depth is the point).
+   */
+  describe("callbackUrl sanitizing (F3 open redirect)", () => {
+    const hostile = [
+      ["an absolute https URL", "https://evil.example"],
+      ["an absolute http URL", "http://evil.example/path"],
+      ["a protocol-relative URL", "//evil.example"],
+      // A literal backslash: browsers normalize `/\evil.example` to `//evil.example`.
+      ["a backslash-escaped protocol-relative URL", "/\\evil.example"],
+      ["a javascript: URL", "javascript:alert(1)"],
+      ["a relative path with no leading slash", "evil.example"],
+    ] as const;
+
+    it.each(hostile)(
+      "sends an already-signed-in visitor to / rather than %s",
+      async (_label, raw) => {
+        mockUseSearchParams.mockReturnValue(
+          new URLSearchParams([["callbackUrl", raw]])
+        );
+        mockGetSession.mockResolvedValue({ data: { user: { id: "ba-1" } } });
+
+        render(<SignIn />);
+
+        await waitFor(() => expect(window.location.href).toBe("/"));
+        expect(window.location.href).not.toContain("evil.example");
+      }
+    );
+
+    it.each(hostile)("never hands %s to signIn.social", async (_label, raw) => {
+      mockUseSearchParams.mockReturnValue(
+        new URLSearchParams([["callbackUrl", raw]])
+      );
+
+      render(<SignIn />);
+
+      await waitFor(() =>
+        expect(mockSignInSocial).toHaveBeenCalledWith({
+          provider: "ministry-platform",
+          callbackURL: "/",
+        })
+      );
+    });
+
+    it("preserves a legitimate relative path with a query string", async () => {
+      mockUseSearchParams.mockReturnValue(
+        new URLSearchParams([["callbackUrl", "/contactlookup?x=1"]])
+      );
+
+      render(<SignIn />);
+
+      await waitFor(() =>
+        expect(mockSignInSocial).toHaveBeenCalledWith({
+          provider: "ministry-platform",
+          callbackURL: "/contactlookup?x=1",
+        })
+      );
+    });
+
+    it("preserves a legitimate deep link for an already-signed-in visitor", async () => {
+      mockUseSearchParams.mockReturnValue(
+        new URLSearchParams([["callbackUrl", "/contactlookup/abc?tab=logs"]])
+      );
+      mockGetSession.mockResolvedValue({ data: { user: { id: "ba-1" } } });
+
+      render(<SignIn />);
+
+      await waitFor(() =>
+        expect(window.location.href).toBe("/contactlookup/abc?tab=logs")
+      );
+    });
+
+    it("treats a bare / as valid", async () => {
+      mockUseSearchParams.mockReturnValue(
+        new URLSearchParams([["callbackUrl", "/"]])
+      );
+
+      render(<SignIn />);
+
+      await waitFor(() =>
+        expect(mockSignInSocial).toHaveBeenCalledWith({
+          provider: "ministry-platform",
+          callbackURL: "/",
+        })
+      );
+    });
   });
 });
