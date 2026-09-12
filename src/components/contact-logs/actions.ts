@@ -2,8 +2,11 @@
 
 import { ContactLog } from "@/lib/providers/ministry-platform/models/ContactLog";
 import { ContactLogTypes } from "@/lib/providers/ministry-platform/models/ContactLogTypes";
-import { ContactLogInput } from "@/lib/providers/ministry-platform/models/ContactLogSchema";
 import { ContactLogService } from "@/services/contactLogService";
+import type {
+  ContactLogCreateInput,
+  ContactLogUpdateInput,
+} from "@/services/contactLogService";
 import { AuthorizationService } from "@/services/authorizationService";
 import { sanitizeNumericId } from "@/lib/providers/ministry-platform/utils/filter-sanitize";
 import type { MpOperation } from "@/services/authorizationService";
@@ -63,23 +66,21 @@ export async function getContactLogTypes(): Promise<ContactLogTypes[]> {
 }
 
 export async function createContactLog(
-  contactLogData: Omit<ContactLogInput, "Contact_Log_ID" | "Made_By">
+  contactLogData: ContactLogCreateInput
 ): Promise<ContactLog> {
   try {
-    const userId = await requireContactLogAccess("create");
+    // Gate first: an unauthorized caller gets no argument feedback at all.
+    await requireContactLogAccess("create");
 
     if (!contactLogData.Contact_ID || !contactLogData.Contact_Date || !contactLogData.Notes) {
       throw new Error("Required fields are missing: Contact_ID, Contact_Date, and Notes are required");
     }
 
-    // Made_By records who made the contact, taken from the acting session.
-    const logDataWithUser = {
-      ...contactLogData,
-      Made_By: userId,
-    };
-
+    // `Made_By` is deliberately NOT assembled here. The service stamps it from
+    // the authorization gate and strips any value the caller sent, so there is
+    // exactly one place authorship can come from (F4).
     const contactLogService = await ContactLogService.getInstance();
-    const contactLog = await contactLogService.createContactLog(logDataWithUser);
+    const contactLog = await contactLogService.createContactLog(contactLogData);
 
     return contactLog;
   } catch (error) {
@@ -90,11 +91,10 @@ export async function createContactLog(
 
 export async function updateContactLog(
   contactLogId: number,
-  contactLogData: Partial<Omit<ContactLogInput, "Contact_Log_ID" | "Made_By">>
+  contactLogData: ContactLogUpdateInput
 ): Promise<ContactLog> {
   try {
     // Gate first: an unauthorized caller gets no argument feedback at all.
-    // The returned User_ID is deliberately NOT written to Made_By — see below.
     await requireContactLogAccess("update");
 
     // Validates at the boundary. TypeScript's `number` is erased at runtime and a
@@ -102,10 +102,12 @@ export async function updateContactLog(
     // rather than trusted downstream.
     const logId = sanitizeNumericId(contactLogId, "Contact Log ID");
 
-    // Made_By records who made the *contact*, not who last edited the row.
-    // Under this policy any role-holder may edit anyone's log, so stamping the
-    // editor would rewrite the pastoral record's authorship. MP's audit trail
-    // already captures the editor via `$userId` in ContactLogService.
+    // Neither `Made_By` nor `Contact_ID` is forwarded from the caller. The
+    // service stamps `Made_By` from the authorization gate and never sends
+    // `Contact_ID` at all, so an edit can neither forge authorship nor move a
+    // log onto a different contact's record (F4). `Made_By` therefore reads as
+    // the staff member who last wrote the row; MP's audit trail additionally
+    // records every edit via `$userId`.
     const contactLogService = await ContactLogService.getInstance();
     const contactLog = await contactLogService.updateContactLog(logId, contactLogData);
 
