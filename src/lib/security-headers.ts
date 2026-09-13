@@ -131,6 +131,17 @@ export interface CspOptions {
    */
   imageOrigin?: string | null;
   /**
+   * Whether this policy will be sent as `Content-Security-Policy-Report-Only`.
+   *
+   * Only affects `upgrade-insecure-requests`, which browsers refuse to honor in
+   * a report-only policy and complain about in the console on every page:
+   * "The Content Security Policy directive 'upgrade-insecure-requests' is
+   * ignored when delivered in a report-only policy." Emitting it there buys
+   * nothing and trains people to ignore the console, which is the one place
+   * report-only mode does its work.
+   */
+  reportOnly?: boolean;
+  /**
    * Origin of the Ministry Platform OAuth server, for `form-action`.
    *
    * Sign-out is a `<form action={handleSignOut}>` server action that ends in
@@ -152,6 +163,7 @@ export interface CspOptions {
 export function buildContentSecurityPolicy({
   nonce,
   isDev = false,
+  reportOnly = false,
   imageOrigin = null,
   formActionOrigin = null,
 }: CspOptions): string {
@@ -169,20 +181,35 @@ export function buildContentSecurityPolicy({
     // in a production build.
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ''}`,
 
-    // In dev, Next injects stylesheets through JS with no nonce available, so
-    // the nonce form would blank the page. In production, Tailwind and
-    // `next/font` are real files under `/_next/static`, covered by `'self'`.
-    isDev ? "style-src 'self' 'unsafe-inline'" : `style-src 'self' 'nonce-${nonce}'`,
-
-    // Deliberate loosening, do not "tighten" this back. Radix and vaul position
-    // every popover, dialog, select and drawer by writing inline `style`
-    // attributes, which `style-src-attr` governs and which a nonce cannot
-    // cover — a nonce applies to `<style>` elements, not to attributes. Without
-    // this, every floating UI surface in the app renders in the wrong place.
-    // The XSS value of an inline style attribute is low on its own; the
-    // directive exists so that `style-src` above can stay strict for real
-    // stylesheets.
-    "style-src-attr 'unsafe-inline'",
+    // Deliberate loosening, do not "tighten" this back to a nonce.
+    //
+    // This directive originally read `style-src 'self' 'nonce-...'` plus a
+    // separate `style-src-attr 'unsafe-inline'`, on the theory that a nonce
+    // could cover real stylesheets while the attr directive covered Radix's
+    // inline `style` attributes. Enforcing the policy in a browser disproved
+    // it (2026-09-12): Radix's dialog pulls in react-remove-scroll, which locks
+    // body scroll by INJECTING A <style> ELEMENT at runtime. That is an
+    // element, not an attribute, so `style-src-attr` does not apply and it
+    // falls through to `style-src` — where a nonce cannot help, because the
+    // element is created by script long after the server chose the nonce.
+    // Under enforcement the browser blocked it and the dialog broke with
+    // React error #441.
+    //
+    // A hash is not a workable alternative: the blocked content includes the
+    // computed scrollbar width, so it varies by platform and zoom level. Two
+    // different hashes showed up in a single page view.
+    //
+    // `'unsafe-inline'` is therefore the honest answer, and it must appear
+    // WITHOUT a nonce — a nonce in the same directive makes CSP3 browsers
+    // ignore `'unsafe-inline'` entirely, which is the trap that produced the
+    // broken policy above. `style-src-attr` is gone as redundant: this covers
+    // attributes and elements alike.
+    //
+    // The security cost is real but small: inline STYLE injection can do
+    // limited data exfiltration via selectors, but not script execution. The
+    // control that matters, `script-src` with a nonce and `strict-dynamic`,
+    // is untouched.
+    "style-src 'self' 'unsafe-inline'",
 
     // `data:` and `blob:` are next/image's placeholder and preview machinery.
     `img-src 'self' data: blob:${imageOrigin ? ` ${imageOrigin}` : ''}`,
@@ -209,8 +236,10 @@ export function buildContentSecurityPolicy({
   ];
 
   // Production only: the directive rewrites http subresource URLs to https,
-  // which is exactly wrong against a local http dev server.
-  if (!isDev) {
+  // which is exactly wrong against a local http dev server. Also omitted in
+  // report-only mode, where browsers ignore it and log an error saying so on
+  // every page — noise that buries the real violation reports.
+  if (!isDev && !reportOnly) {
     directives.push('upgrade-insecure-requests');
   }
 
@@ -220,19 +249,26 @@ export function buildContentSecurityPolicy({
 /**
  * Which CSP header name to send.
  *
- * Ships report-only. A nonce-based CSP is the one security header that can
- * white-screen an app — a page Next prerendered at build time has no nonce in
- * its inline bootstrap script, and a missed third-party origin is invisible
- * until a user hits that exact screen. Report-only puts the violations in the
- * browser console, and in a report endpoint if one is ever configured, without
- * breaking anything.
+ * ENFORCES by default. `CSP_ENFORCE=false` drops back to report-only as an
+ * escape hatch, and only that exact string does — any other value, including
+ * unset or a typo, enforces.
  *
- * Set `CSP_ENFORCE=true` to switch to enforcement. Any other value, including
- * unset, stays report-only; enforcement is opt-in rather than opt-out so that
- * a typo in this variable can never take down a deploy.
+ * This shipped report-only first, deliberately: a nonce-based CSP is the one
+ * security header that can white-screen an app, so the policy was trialled in
+ * a browser before it was allowed to block anything. That trial happened
+ * 2026-09-12 against a production build — sign-in, contact search with MP
+ * photos, contact detail, the Radix dialog, the Select inside it, the user
+ * menu and sign-out to MP — and it earned its keep: enforcement caught a
+ * blocked runtime-injected `<style>` that report-only had NOT reported (see
+ * the style-src comment above). Once that was fixed, the enforced walk came
+ * back clean, so the default flipped.
+ *
+ * The escape hatch is deliberately inverted from the old default. Report-only
+ * is now the unusual state — something you turn on to diagnose a violation,
+ * not the state a deploy drifts into by forgetting a variable.
  */
 export function cspHeaderName(
-  enforce: boolean = process.env.CSP_ENFORCE === 'true'
+  enforce: boolean = process.env.CSP_ENFORCE !== 'false'
 ): 'Content-Security-Policy' | 'Content-Security-Policy-Report-Only' {
   return enforce ? 'Content-Security-Policy' : 'Content-Security-Policy-Report-Only';
 }

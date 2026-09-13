@@ -140,28 +140,39 @@ describe('buildContentSecurityPolicy', () => {
     expect(directive(csp, 'font-src')).toBe("font-src 'self'");
   });
 
-  it('allows inline style attributes', () => {
-    // Deliberate and load-bearing: Radix and vaul position every popover,
-    // dialog, select and drawer with inline `style` attributes, which a nonce
-    // cannot cover. Tightening this renders floating UI in the wrong place.
-    expect(directive(buildContentSecurityPolicy(base), 'style-src-attr')).toBe(
-      "style-src-attr 'unsafe-inline'"
-    );
+  it('allows inline styles, in dev and in production alike', () => {
+    // Deliberate and load-bearing. Proven necessary by ENFORCING the policy in
+    // a real browser (2026-09-12): Radix's dialog pulls in react-remove-scroll,
+    // which locks body scroll by injecting a <style> ELEMENT at runtime. That
+    // is not an attribute, so the old `style-src-attr` did not cover it, and a
+    // nonce cannot cover it either — the element is created by script long
+    // after the server picked the nonce. The browser blocked it and the dialog
+    // died with React error #441.
+    for (const csp of [
+      buildContentSecurityPolicy(base),
+      buildContentSecurityPolicy({ ...base, isDev: true }),
+    ]) {
+      expect(directive(csp, 'style-src')).toBe("style-src 'self' 'unsafe-inline'");
+    }
   });
 
-  it('nonces stylesheets outside dev', () => {
-    expect(directive(buildContentSecurityPolicy(base), 'style-src')).toBe(
-      "style-src 'self' 'nonce-TEST-NONCE'"
-    );
+  it("never puts a nonce in style-src alongside 'unsafe-inline'", () => {
+    // The trap that produced the broken policy: CSP3 browsers IGNORE
+    // 'unsafe-inline' when a nonce is present in the same directive, so a
+    // nonce here silently re-blocks every runtime-injected <style>.
+    expect(directive(buildContentSecurityPolicy(base), 'style-src')).not.toContain('nonce-');
   });
 
-  it('allows unsafe-inline styles in dev only', () => {
-    // The dev server injects stylesheets through JS with no nonce available;
-    // the nonce form would blank the page.
-    const dev = buildContentSecurityPolicy({ ...base, isDev: true });
+  it('no longer emits style-src-attr', () => {
+    // Redundant once style-src allows inline: that covers attributes and
+    // elements alike. Keeping it would imply a distinction that does not hold.
+    expect(directive(buildContentSecurityPolicy(base), 'style-src-attr')).toBeUndefined();
+  });
 
-    expect(directive(dev, 'style-src')).toBe("style-src 'self' 'unsafe-inline'");
-    expect(directive(dev, 'script-src')).toContain("'unsafe-eval'");
+  it('allows unsafe-eval in dev only', () => {
+    expect(directive(buildContentSecurityPolicy({ ...base, isDev: true }), 'script-src')).toContain(
+      "'unsafe-eval'"
+    );
   });
 
   it('does not allow unsafe-eval outside dev', () => {
@@ -183,6 +194,25 @@ describe('buildContentSecurityPolicy', () => {
     expect(
       directive(buildContentSecurityPolicy({ ...base, isDev: true }), 'upgrade-insecure-requests')
     ).toBeUndefined();
+  });
+
+  it('omits upgrade-insecure-requests in report-only mode', () => {
+    // Browsers refuse to honor it in a report-only policy and log an error
+    // saying so on EVERY page. Observed during the F9 browser walk: it was the
+    // only CSP message in the console, burying the reports report-only mode
+    // exists to surface.
+    expect(
+      directive(buildContentSecurityPolicy({ ...base, reportOnly: true }), 'upgrade-insecure-requests')
+    ).toBeUndefined();
+  });
+
+  it('keeps every other directive identical in report-only mode', () => {
+    // report-only must not quietly weaken the policy being trialled — that
+    // would make the trial meaningless.
+    const enforced = buildContentSecurityPolicy(base).split('; ');
+    const reported = buildContentSecurityPolicy({ ...base, reportOnly: true }).split('; ');
+
+    expect(reported).toEqual(enforced.filter((d) => d !== 'upgrade-insecure-requests'));
   });
 
   it('adds the MP file origin to img-src when configured', () => {
@@ -222,30 +252,35 @@ describe('buildContentSecurityPolicy', () => {
 });
 
 describe('cspHeaderName', () => {
-  it('reports by default', () => {
-    // A nonce CSP is the one security header that can white-screen the app, so
-    // enforcement is opt-in and a typo in the variable cannot take a deploy
-    // down.
-    expect(cspHeaderName(false)).toBe('Content-Security-Policy-Report-Only');
-  });
-
-  it('enforces when asked', () => {
+  it('enforces by default', () => {
+    // Flipped from report-only on 2026-09-12, after the policy was walked
+    // through a real browser against a production build with no violations.
     expect(cspHeaderName(true)).toBe('Content-Security-Policy');
   });
 
+  it('reports when explicitly asked', () => {
+    expect(cspHeaderName(false)).toBe('Content-Security-Policy-Report-Only');
+  });
+
   it.each([
-    ['true', 'Content-Security-Policy'],
     ['false', 'Content-Security-Policy-Report-Only'],
-    ['1', 'Content-Security-Policy-Report-Only'],
-    ['TRUE', 'Content-Security-Policy-Report-Only'],
+    ['true', 'Content-Security-Policy'],
+    ['0', 'Content-Security-Policy'],
+    ['FALSE', 'Content-Security-Policy'],
+    ['', 'Content-Security-Policy'],
   ])('reads CSP_ENFORCE=%s as %s', (value, expected) => {
+    // Only the exact string "false" backs off. Everything else enforces, so a
+    // typo in this variable can never silently disarm the policy in a deploy —
+    // the failure mode is a too-strict header, which is loud, rather than a
+    // missing one, which is invisible.
     vi.stubEnv('CSP_ENFORCE', value);
     expect(cspHeaderName()).toBe(expected);
     vi.stubEnv('CSP_ENFORCE', undefined);
   });
 
-  it('reports when CSP_ENFORCE is unset', () => {
+  it('enforces when CSP_ENFORCE is unset', () => {
+    // The common case: nobody sets this variable at all.
     vi.stubEnv('CSP_ENFORCE', undefined);
-    expect(cspHeaderName()).toBe('Content-Security-Policy-Report-Only');
+    expect(cspHeaderName()).toBe('Content-Security-Policy');
   });
 });
