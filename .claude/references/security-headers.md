@@ -23,28 +23,47 @@ is the modern equivalent for the rest. They are *not* both CSP headers — two
 `Content-Security-Policy` headers on one response are enforced as an
 intersection, which is a miserable thing to debug.
 
-## The CSP ships report-only
+## The CSP enforces
 
-`CSP_ENFORCE=true` switches `src/proxy.ts` from
-`Content-Security-Policy-Report-Only` to `Content-Security-Policy`. Only that
-exact string enforces; anything else, unset included, stays report-only, so a
-typo in the variable cannot take a deploy down.
+`src/proxy.ts` sends `Content-Security-Policy`. `CSP_ENFORCE=false` — and only
+that exact string — drops back to `Content-Security-Policy-Report-Only`.
+Anything else, unset included, enforces, so a typo fails loud (too strict)
+rather than silent (no policy).
 
-A nonce CSP is the one security header that can white-screen an app. Before
-flipping it on, walk the app with devtools open and confirm a clean console:
+It shipped report-only first and was flipped on 2026-09-12 after the policy was
+walked through a real browser against a **production build**, clean:
 
-- sign-in (the redirect out to MP and back)
-- **sign-out** — the likeliest breakage; see `form-action` below
+- sign-in (the redirect out to MP and back), and sign-out to MP's endsession
 - contact photos on the header avatar, search results, and the detail page
-- every Radix surface: dropdown, dialog, select, tooltip, vaul drawer
-- contact search, and contact-log create/edit
+- every Radix surface: dropdown, dialog, the select inside the dialog
+- contact search and the contact-log dialog
+
+**Report-only is not a substitute for that walk.** In the report-only pass the
+console was completely clean; enforcing the same policy immediately blocked a
+runtime-injected `<style>` and broke the contact-log dialog with React error
+#441 (see `style-src` below). If you change the policy, re-walk it enforced,
+against a production build — `next dev` has deliberate relaxations
+(`'unsafe-eval'`, `ws:`) that hide violations.
 
 ## Deliberate loosenings — do not "tighten" these
 
-- **`style-src-attr 'unsafe-inline'`** — Radix and vaul position every popover,
-  dialog, select and drawer by writing inline `style` attributes. A nonce
-  covers `<style>` elements, not attributes. Removing this renders every
-  floating UI surface in the wrong place.
+- **`style-src 'self' 'unsafe-inline'`, with NO nonce** — Radix's dialog pulls
+  in react-remove-scroll, which locks body scroll by **injecting a `<style>`
+  element at runtime**. A nonce cannot cover it (the element is created by
+  script, long after the server picked the nonce) and neither can a hash (the
+  content embeds the computed scrollbar width, so it varies by platform and
+  zoom — two different hashes appeared in one page view).
+
+  The nonce must stay OUT of this directive: CSP3 browsers ignore
+  `'unsafe-inline'` whenever a nonce is present in the same directive, which
+  silently re-blocks every runtime-injected style. `style-src-attr` is gone as
+  redundant — `style-src` covers attributes and elements alike.
+
+  This replaced an earlier `style-src 'self' 'nonce-…'` + `style-src-attr
+  'unsafe-inline'` design that looked right and was wrong. Report-only mode did
+  **not** surface it; only enforcing the policy in a real browser did, where
+  the dialog broke with React error #441. That is the argument for doing the
+  enforced walk rather than trusting a clean report-only run.
 - **`form-action 'self' <MP origin>`** — sign-out is a `<form action={…}>`
   server action that ends in `redirect()` to MP's `/oauth/connect/endsession`.
   Browsers apply `form-action` to the whole redirect chain a form submission

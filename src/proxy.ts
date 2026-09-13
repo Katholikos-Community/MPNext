@@ -21,13 +21,14 @@ export async function proxy(request: NextRequest) {
   //
   // Ships as `Content-Security-Policy-Report-Only` until `CSP_ENFORCE=true`.
   const nonce = createNonce();
+  const cspHeader = cspHeaderName();
   const csp = buildContentSecurityPolicy({
     nonce,
     isDev: process.env.NODE_ENV === 'development',
+    reportOnly: cspHeader === 'Content-Security-Policy-Report-Only',
     imageOrigin: originOf(process.env.NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL),
     formActionOrigin: originOf(process.env.MINISTRY_PLATFORM_BASE_URL),
   });
-  const cspHeader = cspHeaderName();
 
   // Next.js does not take the nonce from an argument — it re-reads it off the
   // INCOMING request headers during render and stamps it onto the framework's

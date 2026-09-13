@@ -219,7 +219,7 @@ describe('proxy', () => {
       // must be present and must agree with the response policy. A mismatch
       // here is the failure that renders a blank page under enforcement.
       expect(nonce).toBeTruthy();
-      expect(forwardedRequestHeaders().get('content-security-policy-report-only')).toContain(
+      expect(forwardedRequestHeaders().get('content-security-policy')).toContain(
         `'nonce-${nonce}'`
       );
       expect(cspFrom(response)).toContain(`'nonce-${nonce}'`);
@@ -236,22 +236,27 @@ describe('proxy', () => {
       expect(nonceOf(first)).not.toBe(nonceOf(second));
     });
 
-    it('reports rather than enforces by default', async () => {
-      const response = await proxy(createMockRequest('/signin'));
-      const headers = (response as unknown as { headers: Headers }).headers;
-
-      expect(headers.get('content-security-policy-report-only')).toBeTruthy();
-      expect(headers.get('content-security-policy')).toBeNull();
-    });
-
-    it('enforces when CSP_ENFORCE is true', async () => {
-      vi.stubEnv('CSP_ENFORCE', 'true');
-
+    it('enforces by default', async () => {
       const response = await proxy(createMockRequest('/signin'));
       const headers = (response as unknown as { headers: Headers }).headers;
 
       expect(headers.get('content-security-policy')).toBeTruthy();
       expect(headers.get('content-security-policy-report-only')).toBeNull();
+    });
+
+    it('falls back to report-only when CSP_ENFORCE is false', async () => {
+      vi.stubEnv('CSP_ENFORCE', 'false');
+
+      const response = await proxy(createMockRequest('/signin'));
+      const headers = (response as unknown as { headers: Headers }).headers;
+
+      expect(headers.get('content-security-policy-report-only')).toBeTruthy();
+      expect(headers.get('content-security-policy')).toBeNull();
+      // upgrade-insecure-requests is dropped in report-only, where browsers
+      // ignore it and log an error on every page.
+      expect(headers.get('content-security-policy-report-only')).not.toContain(
+        'upgrade-insecure-requests'
+      );
 
       // Targeted, not `vi.unstubAllEnvs()`: that would also drop the stubs
       // src/test-setup.ts installs for every test in this file.
