@@ -474,6 +474,56 @@ describe("ContactLogs", () => {
 
       expect(form.getByLabelText(/contact date/i)).toHaveValue("2026-08-22T00:00");
     });
+
+    it("renders a placeholder instead of throwing for a blank date", () => {
+      expect(() => renderLogs({ contactLogs: withDate("") })).not.toThrow();
+
+      expect(screen.getByText("—")).toBeInTheDocument();
+    });
+
+    it("renders a placeholder for a value no parser can read", () => {
+      renderLogs({ contactLogs: withDate("not-a-date") });
+
+      expect(screen.getByText("—")).toBeInTheDocument();
+    });
+
+    it("keeps rendering the other rows when one log has an unusable date", () => {
+      // The regression guard: formatDateTime is called unguarded during row
+      // render and the app has no error boundary, so a throw here would blank
+      // the whole page rather than one row.
+      renderLogs({
+        contactLogs: [
+          { ...logs[0], Contact_Log_ID: 701, Contact_Date: "2026-08-20T14:30:00" },
+          {
+            ...logs[0],
+            Contact_Log_ID: 702,
+            Contact_Date: "not-a-date",
+            Notes: "Row with a broken date.",
+          },
+          {
+            ...logs[0],
+            Contact_Log_ID: 703,
+            Contact_Date: "2026-08-22T09:00:00",
+            Notes: "Row after the broken one.",
+          },
+        ],
+      });
+
+      expect(screen.getByText("Aug 20, 2026, 2:30 PM")).toBeInTheDocument();
+      expect(screen.getByText("Aug 22, 2026, 9:00 AM")).toBeInTheDocument();
+      expect(screen.getByText("—")).toBeInTheDocument();
+      expect(screen.getByText("Row with a broken date.")).toBeInTheDocument();
+      expect(screen.getByText("Row after the broken one.")).toBeInTheDocument();
+      expect(screen.getByText(/Contact Logs \(3\)/)).toBeInTheDocument();
+    });
+
+    it("prefills an empty contact date when the log has no date", async () => {
+      // Only reachable now that a blank date no longer crashes the row before
+      // the edit dialog can be opened.
+      const form = await openEditDialog({ contactLogs: withDate("") });
+
+      expect(form.getByLabelText(/contact date/i)).toHaveValue("");
+    });
   });
 
   describe("cancel and dismissal paths", () => {

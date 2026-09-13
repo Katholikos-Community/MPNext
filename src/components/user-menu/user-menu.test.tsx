@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { redirect } from "next/navigation";
 import type { MPUserProfile } from "@/lib/providers/ministry-platform/types";
 
 /**
@@ -21,12 +22,25 @@ import type { MPUserProfile } from "@/lib/providers/ministry-platform/types";
  *  3. the identity header degrades safely — MP returns `Nickname` and
  *     `Email_Address` as optional/null, and this label is rendered from raw
  *     profile fields with no guard beyond the `||` fallback;
- *  4. a rejected sign-out is surfaced nowhere — recorded below as the current
- *     behavior so a future try/catch is a deliberate change, not a surprise.
+ *  4. a rejected sign-out is reported to the user via `alert` and does not
+ *     escape as an unhandled rejection — while Next's own NEXT_REDIRECT signal
+ *     is re-thrown untouched, so the happy path stays silent.
+ *
+ * On (4): `handleSignOut` ends in `redirect()`, which Next implements by
+ * throwing. In Next 16 that reaches the client too — the app router's
+ * server-action reducer deliberately *rejects* the action promise with a
+ * redirect error (`router-reducer/reducers/server-action-reducer.js`, "the
+ * action promise will be rejected with a redirect so that it's handled by
+ * RedirectBoundary"). So a bare try/catch around `handleSignOut()` would alert
+ * on every *successful* sign-out. `unstable_rethrow` is what separates the two,
+ * and the tests below pin both halves: a real failure alerts, a redirect signal
+ * does not.
  *
  * `./actions` is mocked in full: the real `handleSignOut` hits Better Auth and
  * redirects to Ministry Platform's end-session endpoint. It is covered
- * separately in `actions.test.ts`.
+ * separately in `actions.test.ts`. `next/navigation` is deliberately NOT
+ * mocked — `unstable_rethrow`'s whole job is recognising Next's real signal
+ * shape, so a mock would test the mock.
  */
 
 const { mockHandleSignOut } = vi.hoisted(() => ({
@@ -55,6 +69,62 @@ function installJsdomPolyfills() {
   proto.setPointerCapture ??= () => {};
   proto.releasePointerCapture ??= () => {};
   proto.scrollIntoView ??= () => {};
+}
+
+/**
+ * Builds the exact object Next rejects a server action with when that action
+ * called `redirect()`. Constructed by letting Next's own `redirect()` throw
+ * rather than hand-rolling a digest string, so this fixture cannot drift from
+ * the framework: the client reducer takes that same `getRedirectError(...)`
+ * value and only sets `handled` on it before rejecting.
+ */
+function makeRedirectSignal(destination: string): unknown {
+  try {
+    redirect(destination);
+  } catch (err) {
+    (err as { handled?: boolean }).handled = true;
+    return err;
+  }
+  throw new Error(
+    "next/navigation's redirect() did not throw — the control-flow signal this component guards against has changed shape"
+  );
+}
+
+/**
+ * Runs `run()` with Node's unhandled-rejection reporting diverted into an array
+ * and returns what was collected.
+ *
+ * Note this is the inverse of what it was used for before the fix: it used to
+ * hide an escaping rejection so the broken behavior could be pinned without
+ * failing the run. Now it is an assertion target — genuine failures must
+ * collect *nothing* (they are caught and alerted), and a NEXT_REDIRECT signal
+ * must collect *itself* (proving it was re-thrown, not swallowed).
+ */
+async function captureUnhandledRejections(
+  run: () => Promise<void>
+): Promise<unknown[]> {
+  const captured: unknown[] = [];
+  const priorListeners = process.listeners("unhandledRejection");
+  process.removeAllListeners("unhandledRejection");
+  process.on("unhandledRejection", (reason) => captured.push(reason));
+
+  try {
+    await run();
+    // Node reports an unhandled rejection only once the microtask queue has
+    // drained and the promise is still unhandled; yield the macrotask turns
+    // that takes before reading the result.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return captured;
+  } finally {
+    process.removeAllListeners("unhandledRejection");
+    for (const listener of priorListeners) {
+      process.on(
+        "unhandledRejection",
+        listener as NodeJS.UnhandledRejectionListener
+      );
+    }
+  }
 }
 
 const profile: MPUserProfile = {
@@ -108,10 +178,15 @@ async function openMenu(
 }
 
 describe("UserMenu", () => {
+  let alertSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     installJsdomPolyfills();
     vi.clearAllMocks();
     mockHandleSignOut.mockResolvedValue(undefined);
+    // jsdom's window.alert only logs "not implemented"; stub it so the calls are
+    // assertable (and so a regression cannot spam the test output).
+    alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -200,37 +275,79 @@ describe("UserMenu", () => {
       expect(mockHandleSignOut).not.toHaveBeenCalled();
     });
 
-    it("leaves a rejected sign-out unreported to the user", async () => {
-      // `handleItemClick` has no try/catch, so a rejected action escapes as an
-      // unhandled rejection and the user sees nothing. This test pins that
-      // current behavior — and keeps the escaped rejection from failing the
-      // run — so adding error surfacing later is a conscious change here.
-      const captured: unknown[] = [];
-      const priorListeners = process.listeners("unhandledRejection");
-      process.removeAllListeners("unhandledRejection");
-      process.on("unhandledRejection", (reason) => captured.push(reason));
+    it("reports a rejected sign-out to the user instead of dropping it", async () => {
+      const onClose = vi.fn();
+      mockHandleSignOut.mockRejectedValueOnce(new Error("network down"));
 
-      try {
-        const onClose = vi.fn();
-        mockHandleSignOut.mockRejectedValueOnce(new Error("network down"));
-
+      const escaped = await captureUnhandledRejections(async () => {
         const menu = await openMenu({ onClose });
         fireEvent.click(menu.getByRole("menuitem", { name: /sign out/i }));
 
+        await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+      });
+
+      expect(alertSpy).toHaveBeenCalledWith("Error: network down");
+      // The failure is now handled, so nothing escapes to the runtime.
+      expect(escaped).toEqual([]);
+      // Ordering is unchanged: the shell still closes before the action runs.
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("falls back to a generic message when the rejection is not an Error", async () => {
+      // Server actions can reject with a plain serialized value, not only an
+      // Error instance — `err.message` would be undefined there.
+      mockHandleSignOut.mockRejectedValueOnce("socket hang up");
+
+      const escaped = await captureUnhandledRejections(async () => {
+        const menu = await openMenu();
+        fireEvent.click(menu.getByRole("menuitem", { name: /sign out/i }));
+
+        await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+      });
+
+      expect(alertSpy).toHaveBeenCalledWith("Error: Sign out failed");
+      expect(escaped).toEqual([]);
+    });
+
+    it("stays silent when the sign-out succeeds", async () => {
+      mockHandleSignOut.mockResolvedValueOnce(undefined);
+
+      const escaped = await captureUnhandledRejections(async () => {
+        const menu = await openMenu();
+        fireEvent.click(menu.getByRole("menuitem", { name: /sign out/i }));
+
         await waitFor(() => expect(mockHandleSignOut).toHaveBeenCalledTimes(1));
-        // The shell was still closed, and no error text was rendered.
-        expect(onClose).toHaveBeenCalledTimes(1);
-        expect(screen.queryByText(/network down/i)).not.toBeInTheDocument();
-        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-      } finally {
-        process.removeAllListeners("unhandledRejection");
-        for (const listener of priorListeners) {
-          process.on(
-            "unhandledRejection",
-            listener as NodeJS.UnhandledRejectionListener
-          );
-        }
-      }
+      });
+
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(escaped).toEqual([]);
+    });
+
+    it("re-throws Next's NEXT_REDIRECT signal rather than alerting on it", async () => {
+      // This is the happy path in production: `handleSignOut` ends in
+      // `redirect()`, and Next rejects the client-side action promise with this
+      // signal. Alerting here would break every successful sign-out.
+      const signal = makeRedirectSignal(
+        "https://mp.example.org/oauth/connect/endsession?post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A3000"
+      );
+      // Guard the fixture itself: if Next stops tagging the signal this way the
+      // test is no longer exercising what it claims to.
+      expect((signal as Error).message).toBe("NEXT_REDIRECT");
+      expect((signal as { digest: string }).digest).toMatch(/^NEXT_REDIRECT;/);
+
+      mockHandleSignOut.mockRejectedValueOnce(signal);
+
+      const escaped = await captureUnhandledRejections(async () => {
+        const menu = await openMenu();
+        fireEvent.click(menu.getByRole("menuitem", { name: /sign out/i }));
+
+        await waitFor(() => expect(mockHandleSignOut).toHaveBeenCalledTimes(1));
+      });
+
+      expect(alertSpy).not.toHaveBeenCalled();
+      // Re-thrown, not swallowed: it propagates out of the handler untouched so
+      // Next's own machinery still owns the navigation.
+      expect(escaped).toEqual([signal]);
     });
   });
 

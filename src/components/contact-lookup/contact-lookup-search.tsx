@@ -47,10 +47,11 @@ export const ContactLookupSearch: React.FC<ContactLookupSearchProps> = ({
     });
   };
 
+  // An empty term is deliberately passed through to handleSearch rather than
+  // short-circuited here: its guard reports [] to the parent so the previous
+  // result list is cleared instead of left on screen as stale matches.
   const performSearch = () => {
-    if (searchTerm.trim()) {
-      handleSearch(searchTerm.trim());
-    }
+    handleSearch(searchTerm.trim());
   };
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {

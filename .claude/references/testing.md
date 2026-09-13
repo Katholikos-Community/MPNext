@@ -514,67 +514,91 @@ Two mechanics worth knowing before editing these:
 Keep branch gates loose where the denominator is small - `src/app/**` has only 10
 branches in total, so a single uncovered one costs 10 points.
 
-### Current coverage (897 tests, 54 files)
+### Current coverage (996 tests, 56 files)
 
 Whole app, as `npm run test:coverage` prints it - every `src/**/*.{ts,tsx}`
 excluding generated models, codegen scripts, `src/components/ui/`, and test files:
 
 | Metric | Value |
 |---|---|
-| Statements | **99.47%** (1141/1147) |
-| Branches | **96.65%** (549/568) |
-| Functions | **98.92%** (275/278) |
-| Lines | **99.73%** (1110/1113) |
+| Statements | **99.73%** (1144/1147) |
+| Branches | **97.18%** (587/604) |
+| Functions | **99.29%** (282/284) |
+| Lines | **99.91%** (1111/1112) |
 
 This is now a single honest number. Earlier revisions of this doc quoted two
 figures - a high non-UI one and a low whole-app one - because feature components
 and app routes were untested; that split no longer exists.
 
-Known remaining gaps, all deliberate. Six uncovered statements:
+Known remaining gaps, all deliberate and all defensive or unreachable:
 
-- `contact-logs.tsx:223` - `if (!editingLog) return;` in `onEditLog`. Every path
-  that clears `editingLog` also closes the dialog in the same update, so the form
-  cannot submit from a render where it is null. Defensive only.
-- `contact-lookup-search.tsx:29-30` - the empty-query early return in
-  `handleSearch`. Unreachable: its only caller `performSearch` applies the same
-  guard first and passes an already-trimmed term. See "Known dead code" below.
-- `lib/auth.ts:350`, `client.ts` (the token-getter closure passed to `HttpClient`),
-  `http-client.ts:31` (one arm of the GET error-message builder).
+- `contact-logs.tsx:232` - `if (!editingLog) return;` in the update handler. Every
+  path that clears `editingLog` also closes the dialog in the same update, so the
+  form cannot submit from a render where it is null.
+- `lib/auth.ts`, `client.ts` (the token-getter closure passed to `HttpClient`),
+  `http-client.ts:31` (one arm of the GET error-message builder), and one branch
+  of the better-auth catch-all route.
 
 And the unreachable branches:
 
 - `helper.ts:189,273` - the `String(validationError)` arm of a validation-error
   message; Zod always throws an `Error`.
-- `contact-logs.tsx:87,123` - `hour === 24 ? 0 : ...` guards. Verified on Node
+- `contact-logs.tsx:95,134` - `hour === 24 ? 0 : ...` guards. Verified on Node
   24.18 / current ICU: `Intl.DateTimeFormat("en-CA", { hour12: false })` returns
   `"00"` at midnight, never `"24"`. Dead here, kept as a cross-ICU safeguard.
-- `contact-logs.tsx:262` - `log.Contact_Date ? ... : ""`, unreachable *because of*
-  the `formatDateTime` bug below.
-- `contact-logs.tsx:380` - an error arm for a `z.string().optional()` field only
+- `contact-logs.tsx:387` - an error arm for a `z.string().optional()` field only
   ever written via `setValue` with a string.
-- `user-menu.tsx:34` - `if (action === "signout")`. `userMenuItems` is a
-  module-level constant with exactly one entry, whose action is `"signout"`.
+- `user-menu.tsx:35` - the false arm of `if (action === "signout")`.
+  `userMenuItems` is a module-level constant with exactly one entry, whose action
+  is `"signout"`.
 
-### Known dead code and defects found while covering the UI
+### Defects found while covering the UI - all four now fixed
 
-Recorded as tests pinning current behavior, not fixed - each needs a source change:
+Covering this code surfaced four real defects. They were first landed as tests
+*pinning* the broken behaviour, then fixed in a follow-up; the notes below are
+kept because each fix has a trap that invites a well-meaning revert.
 
-1. **`contact-logs.tsx:62` `formatDateTime()` throws on a blank or unparseable
-   `Contact_Date`** (`RangeError: Invalid time value`), taking down the whole
-   `ContactLogs` render rather than one row. `ContactLogDisplay.Contact_Date` is
-   typed non-nullable so it needs bad MP data to trigger - but `handleEditClick`
-   at line 262 already guards for a falsy `Contact_Date`, so the two disagree. A
-   guard returning `""` would fix the crash *and* make line 262 reachable.
-2. **`contact-lookup-search.tsx` never clears stale results.** Lines 29-30 look
-   intended to empty the list when the box is cleared, but `performSearch`
-   short-circuits first, so after a search, clearing the input and pressing Enter
-   leaves the previous results and count on screen.
-3. **`user-menu.tsx` `handleItemClick` has no `try/catch`.** A rejected
-   `handleSignOut` escapes as an unhandled promise rejection with no alert and no
-   retry affordance - and this is the only sign-out path in the app.
-4. **`dynamic-breadcrumb.tsx` has no label mapping.** Labels are a crude
-   transform (upper-case first char, hyphens to spaces), so a contact GUID renders
-   as `Ab12cd34 ef56 7890 abcd ef1234567890`.
+1. **`formatDateTime()` could take down the whole page.** It threw
+   `RangeError: Invalid time value` on any `Contact_Date` its regex missed and
+   `new Date()` could not parse (`""`, `" "`, `"not-a-date"`). It is called
+   unguarded during row render and **this app has no error boundary anywhere** -
+   no `error.tsx`, no `global-error.tsx`, no `ErrorBoundary` in `src/` - so the
+   throw escaped `ContactLogs` and hit Next's default global error screen. Now
+   guarded at both entry and the `new Date()` fallback, returning `"—"`. The DTO
+   was deliberately *not* widened to `string | null`: MP's generated model has
+   `Contact_Date: string` / `z.string().datetime()`, a NOT NULL column, so this is
+   defence-in-depth at the formatting boundary, not a type correction. Fixing it
+   also made `handleEditClick`'s `: ""` arm reachable for the first time.
+2. **`contact-lookup-search.tsx` never cleared stale results.** The empty-query
+   early return in `handleSearch` was dead code, because `performSearch` applied
+   the same guard first. After a search, clearing the box and pressing Enter left
+   the previous results and count on screen. `performSearch` now passes the empty
+   term through. Note the button path's safety now rests *entirely* on the
+   `disabled` attribute, since `performSearch` no longer guards - there is a test
+   pinning that.
+3. **A failed sign-out was silent.** `handleItemClick` had no `try/catch`, so a
+   rejected `handleSignOut` escaped as an unhandled rejection on the app's only
+   sign-out path. **The fix has a live trap:** `handleSignOut` ends in
+   `redirect()`, and in Next 16 the server-action reducer explicitly rejects the
+   action promise with the `NEXT_REDIRECT` error
+   (`router-reducer/reducers/server-action-reducer.js`: *"If the action triggered
+   a redirect, the action promise will be rejected with a redirect so that it's
+   handled by RedirectBoundary"*). A plain `try/catch` therefore alerts
+   `Error: NEXT_REDIRECT` on every **successful** sign-out - verified by deleting
+   the guard and watching the test fail with exactly that string. `unstable_rethrow(err)`
+   must stay the first statement in the catch. There is a test asserting a
+   successful sign-out is silent and one asserting the signal is re-thrown.
+4. **`dynamic-breadcrumb.tsx` had no label mapping**, so a contact GUID rendered as
+   `Ab12cd34 ef56 7890 abcd ef1234567890`. Now a known-segment label map plus an
+   anchored GUID pattern that renders `Details`. Two deliberate choices: the map is
+   a `Map`, not an object literal, because the key is a raw URL segment and
+   `/constructor` against a plain object would return an inherited
+   `Object.prototype` member as the label; and the GUID pattern is *not* restricted
+   to the RFC-4122 v4 form, because MP GUIDs are not guaranteed to be v4 and a
+   stricter pattern would fail open on a legitimate id. A GUID renders as the
+   generic `Details` rather than the contact's name because the component is
+   mounted by the layout, which has no access to page data - resolving the name
+   needs a context provider, not a better regex.
 
 ## Test File Inventory
 
@@ -586,7 +610,7 @@ Recorded as tests pinning current behavior, not fixed - each needs a source chan
 | `lib/providers/ministry-platform/utils/filter-sanitize.test.ts` | 49 | Quote doubling, LIKE escaping, GUID rejection, numeric-ID validation |
 | `auth.test.ts` | 47 | `enrichSessionUser`, cached User_ID resolution, OAuth config guards |
 | `services/authorizationService.test.ts` | 40 | MP security-role gate for reads and writes, `hasSecurityRole`, `MP_SECURITY_ROLES` + deprecated `MP_WRITE_SECURITY_ROLES` fallback, `mp.read.unauthorized` / `mp.write.unauthorized` denials, no cross-request caching |
-| `components/contact-logs/contact-logs.test.tsx` | 36 | Delete-confirmation gate, form validation, error surfacing (MP write path), edit/cancel paths, in-flight double-write guard, log-type colour arms, MP wall-clock date rendering |
+| `components/contact-logs/contact-logs.test.tsx` | 40 | Delete-confirmation gate, form validation, error surfacing (MP write path), edit/cancel paths, in-flight double-write guard, log-type colour arms, MP wall-clock date rendering, unparseable-date placeholder (one bad row must not blank the list) |
 | `lib/providers/ministry-platform/services/file.service.test.ts` | 35 | All 8 file endpoints, multipart bodies, unauthenticated blob fetch |
 | `lib/providers/ministry-platform/utils/http-client.test.ts` | 28 | HTTP verbs, URL building, form data, error handling |
 | `components/contact-lookup-details/actions.test.ts` | 26 | Contact details + log type mapping, security-role read gate, numeric-ID injection rejection |
@@ -597,7 +621,7 @@ Recorded as tests pinning current behavior, not fixed - each needs a source chan
 | `components/contact-lookup-details/contact-lookup-details.test.tsx` | 18 | Suspense pending/resolved states, MP photo URL, nickname + initials fallbacks, `N/A` placeholders, props handed to ContactLogs |
 | `services/contactService.test.ts` | 17 | Contact search, getByGuid, updateContact, service-layer read/write gate (F10) |
 | `components/layout/header.test.tsx` | 17 | App-title env fallback, profile-loading state, avatar vs icon fallback, the tooltip chain (incl. falling back to `mpEmail`, never the synthetic session email), sidebar open/close ownership |
-| `components/contact-lookup/contact-lookup-search.test.tsx` | 16 | Empty-query rejection, in-flight lock, Enter vs button submit, action rejection surfaced |
+| `components/contact-lookup/contact-lookup-search.test.tsx` | 18 | Empty query clears results without calling the action, in-flight lock via the disabled button, Enter vs button submit, action rejection surfaced |
 | `lib/providers/ministry-platform/services/procedure.service.test.ts` | 16 | Procedure listing and execution, name encoding |
 | `components/contact-lookup/contact-lookup-results.test.tsx` | 15 | Empty state, row rendering with missing optional fields, row navigation |
 | `lib/providers/ministry-platform/client.test.ts` | 15 | OAuth token management |
@@ -605,12 +629,12 @@ Recorded as tests pinning current behavior, not fixed - each needs a source chan
 | `lib/providers/ministry-platform/services/communication.service.test.ts` | 13 | Email/SMS JSON vs multipart paths |
 | `app/(web)/layout.test.tsx` | 12 | `AuthWrapper` is an ancestor of the page and sits outside `Providers`; Header-in-Suspense; both metadata title branches |
 | `components/shared-actions/user.test.ts` | 12 | `getCurrentUserProfile` delegation, server-computed `canAccessContactFeatures`, role-less users keep their profile |
-| `components/user-menu/user-menu.test.tsx` | 12 | Radix trigger opens on pointerDown, sign-out fires once, `onClose` ordering, degenerate-profile sign-out |
+| `components/user-menu/user-menu.test.tsx` | 15 | Radix trigger opens on pointerDown, sign-out fires once, `onClose` ordering, degenerate-profile sign-out, failed sign-out alerts, successful sign-out stays silent, NEXT_REDIRECT re-thrown not alerted |
 | `components/layout/sidebar.test.tsx` | 11 | Nav label+href pairs, `onClose` from X and from a nav link, panel stays mounted when closed, Contact Lookup hidden/shown by `canAccessContactFeatures` (fails closed) |
 | `services/sessionContextService.test.ts` | 10 | Acting-user resolution, `mp.write.non_user` warning |
-| `components/layout/dynamic-breadcrumb.test.tsx` | 10 | Segment derivation incl. GUIDs, doubled/trailing slashes, all three `customSegments` shapes |
+| `components/layout/dynamic-breadcrumb.test.tsx` | 16 | Mapped route labels, GUID leaf renders `Details` (any case), GUID-ish segments must NOT match, crude fallback retained, doubled/trailing slashes, all three `customSegments` shapes |
 | `components/contact-lookup/actions.test.ts` | 10 | Search contacts action, security-role read gate, denial not flattened into a generic error |
-| `components/contact-lookup/contact-lookup.test.tsx` | 10 | Search-to-results state wiring, error and empty propagation |
+| `components/contact-lookup/contact-lookup.test.tsx` | 12 | Search-to-results state wiring, error and empty propagation, emptying the box clears stale results |
 | `app/(web)/contactlookup/[guid]/page.test.tsx` | 10 | Next.js 16 async `params` await, promises passed down unresolved for streaming, `Contact_ID` guard, rejection propagation |
 | `proxy.test.ts` | 9 | Route protection (public paths, session, errors) |
 | `contexts/user-context.test.tsx` | 8 | UserProvider + useUser lifecycle |
@@ -634,7 +658,7 @@ Recorded as tests pinning current behavior, not fixed - each needs a source chan
 | `app/(web)/contactlookup/page.test.tsx` | 3 | Mounts `<ContactLookup>` with zero props, keeping the client shell a leaf |
 | `contexts/session-context.test.tsx` | 2 | `useAppSession` wrapper |
 | `app/(web)/home/page.test.tsx` | 2 | Unconditional redirect to `/`, never looping back to `/home` |
-| **Total** | **897** | |
+| **Total** | **996** | |
 
 ## Ministry Platform Safety in Tests
 

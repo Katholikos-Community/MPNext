@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowRightOnRectangleIcon } from "@heroicons/react/24/outline";
+import { unstable_rethrow } from "next/navigation";
 import { MPUserProfile } from "@/lib/providers/ministry-platform/types";
 import {
   DropdownMenu,
@@ -32,7 +33,19 @@ export function UserMenu({ onClose, userProfile, children }: UserMenuProps) {
       onClose();
     }
     if (action === "signout") {
-      await handleSignOut();
+      try {
+        await handleSignOut();
+      } catch (err) {
+        // `handleSignOut` ends in `redirect()`, and Next implements that by
+        // throwing a NEXT_REDIRECT control-flow signal. `unstable_rethrow` must
+        // stay the first statement here: it re-throws framework signals so a
+        // successful sign-out still navigates, and lets only genuine failures
+        // fall through to the alert. Remove it and every successful sign-out
+        // pops an error instead of signing the user out.
+        unstable_rethrow(err);
+        const message = err instanceof Error ? err.message : "Sign out failed";
+        alert(`Error: ${message}`);
+      }
     }
   };
 

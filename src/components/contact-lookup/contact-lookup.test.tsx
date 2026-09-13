@@ -15,6 +15,8 @@ import type { ContactSearch } from "@/lib/dto";
  *    later successful search must clear that error rather than stack on it
  * 3. `showResultsImmediately={false}` (the embedded-picker mode) must suppress
  *    the list while still delivering selections to the caller
+ * 4. emptying the box and pressing Enter must clear the list — stale matches
+ *    left under a blank search box read as results for a term no longer typed
  *
  * The server action is mocked — these tests must never reach Ministry Platform.
  */
@@ -68,6 +70,12 @@ function renderLookup(
 function search(input: HTMLElement, term = "Doe") {
   fireEvent.change(input, { target: { value: term } });
   fireEvent.click(screen.getByRole("button"));
+}
+
+/** Types a term and submits it with Enter — the only path open to a blank box. */
+function searchViaEnter(input: HTMLElement, term = "") {
+  fireEvent.change(input, { target: { value: term } });
+  fireEvent.keyPress(input, { key: "Enter", code: "Enter", charCode: 13 });
 }
 
 describe("ContactLookup", () => {
@@ -161,6 +169,37 @@ describe("ContactLookup", () => {
 
     expect(await screen.findByText("Error: MP unavailable")).toBeInTheDocument();
     expect(screen.queryByText("jon@example.com")).not.toBeInTheDocument();
+  });
+
+  it("clears the results when the box is emptied and Enter is pressed", async () => {
+    mockSearchContacts.mockResolvedValueOnce([jon]);
+    const { input } = renderLookup();
+
+    search(input);
+    expect(await screen.findByText("1 contact found")).toBeInTheDocument();
+
+    // Emptying the box and hitting Enter must wipe the list; leaving Jon on
+    // screen would misrepresent him as a match for a search no longer made.
+    searchViaEnter(input, "");
+
+    expect(await screen.findByText("No contacts found")).toBeInTheDocument();
+    expect(screen.queryByText("1 contact found")).not.toBeInTheDocument();
+    expect(screen.queryByText("jon@example.com")).not.toBeInTheDocument();
+    expect(mockSearchContacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the results when the box is reduced to whitespace and Enter is pressed", async () => {
+    mockSearchContacts.mockResolvedValueOnce([jon]);
+    const { input } = renderLookup();
+
+    search(input);
+    expect(await screen.findByText("1 contact found")).toBeInTheDocument();
+
+    searchViaEnter(input, "   ");
+
+    expect(await screen.findByText("No contacts found")).toBeInTheDocument();
+    expect(screen.queryByText("jon@example.com")).not.toBeInTheDocument();
+    expect(mockSearchContacts).toHaveBeenCalledTimes(1);
   });
 
   it("passes the selected contact to onContactSelect and navigates", async () => {
