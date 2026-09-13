@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useRef, Suspense } from "react";
 import { authClient } from "@/lib/auth-client";
 import { useSearchParams } from "next/navigation";
 
@@ -26,17 +26,39 @@ function sanitizeCallbackUrl(raw: string | null | undefined): string {
 function SignInContent() {
   const searchParams = useSearchParams();
   const callbackUrl = sanitizeCallbackUrl(searchParams?.get("callbackUrl"));
-  const [isRedirecting, setIsRedirecting] = useState(false);
+  // Guards against starting a second OAuth flow. A ref, checked and set
+  // SYNCHRONOUSLY before the first await, is the only thing that works here.
+  //
+  // The previous guard was `useState` read inside the `getSession()` callback,
+  // with the state in the effect's own dep array. That cannot hold: React
+  // StrictMode double-invokes effects in dev, both runs reach the async
+  // callback before either `setIsRedirecting(true)` has landed, and both
+  // captured `isRedirecting === false` in their closure — so both called
+  // `signIn.social()`. The server log showed two `POST /api/auth/sign-in/social`
+  // on every single sign-in attempt.
+  //
+  // That is not cosmetic. Each call mints its own state + id_token nonce and
+  // OVERWRITES the single `oauth_state` cookie better-auth keys the callback
+  // on (`storeStateStrategy: "cookie"`), so the two flows race and only the
+  // last cookie written can validate. Sign-in failed intermittently with
+  // `unable_to_get_user_info` — better-auth rejecting the id_token because the
+  // nonce it expected belonged to the other flow.
+  //
+  // A ref survives StrictMode's mount/unmount/remount (same component
+  // instance), so the second effect run returns before touching the network.
+  const signInStartedRef = useRef(false);
 
   useEffect(() => {
+    if (signInStartedRef.current) return;
+    signInStartedRef.current = true;
+
     // Check if user is already signed in
     authClient.getSession().then(({ data: session }) => {
       if (session) {
         // User is already signed in, redirect to callback URL
         window.location.href = callbackUrl;
-      } else if (!isRedirecting) {
+      } else {
         // User is not signed in, initiate sign in
-        setIsRedirecting(true);
         // better-auth 1.7 routes generic OAuth providers through the standard
         // social sign-in path; `signIn.oauth2()` was removed.
         authClient.signIn.social({
@@ -45,7 +67,7 @@ function SignInContent() {
         });
       }
     });
-  }, [callbackUrl, isRedirecting]);
+  }, [callbackUrl]);
 
   return (
     <div className="flex items-center justify-center min-h-screen">

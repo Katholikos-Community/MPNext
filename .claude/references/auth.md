@@ -364,6 +364,33 @@ export const authClient = createAuthClient({
 7. UserProvider calls getCurrentUserProfile(userGuid) → loads MP profile
 ```
 
+### /signin must start exactly ONE OAuth flow
+
+Step 2 is not idempotent and must never run twice for one page load.
+
+Nonce binding is on for this provider (`requiresIdTokenNonce` is true whenever
+discovery supplies an id_token config and `disableIdTokenNonceBinding` is
+unset), and `account.storeStateStrategy` is `"cookie"`. So each
+`signIn.social()` call mints its own `state` + id_token `nonce` and overwrites
+the single `oauth_state` cookie that step 5b validates against. Two calls race,
+only the last cookie written can win, and the loser's id_token fails
+verification — surfacing as `/auth-error?error=unable_to_get_user_info` with
+`id_token failed verification against the discovery JWKS or expected nonce` in
+the server log. It is intermittent, which makes it look like an MP or network
+problem rather than a client bug.
+
+This actually happened (2026-09-12). The guard in `src/components/sign-in/`
+was a `useState` flag read *inside* the `getSession()` callback, with the state
+in the effect's dep array. React StrictMode double-invokes effects in dev: both
+runs reached the async callback before `setIsRedirecting(true)` landed, both
+had captured `false`, and both called `signIn.social()` — two
+`POST /api/auth/sign-in/social` per attempt.
+
+The guard must be a **ref, checked and set synchronously before the first
+`await`**. A state flag cannot work here, no matter where it is read.
+`src/app/signin/page.test.tsx` pins this with a StrictMode test; that test
+fails against the old implementation.
+
 **On failure**, better-auth's callback redirects to `onAPIError.errorURL`
 (`/auth-error`, configured in `src/lib/auth.ts`) with the failure code as a
 query parameter: `/auth-error?error=<code>` (and, when available,
