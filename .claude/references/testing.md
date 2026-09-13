@@ -514,17 +514,17 @@ Two mechanics worth knowing before editing these:
 Keep branch gates loose where the denominator is small - `src/app/**` has only 10
 branches in total, so a single uncovered one costs 10 points.
 
-### Current coverage (996 tests, 56 files)
+### Current coverage (1015 tests, 59 files)
 
 Whole app, as `npm run test:coverage` prints it - every `src/**/*.{ts,tsx}`
 excluding generated models, codegen scripts, `src/components/ui/`, and test files:
 
 | Metric | Value |
 |---|---|
-| Statements | **99.73%** (1144/1147) |
-| Branches | **97.18%** (587/604) |
-| Functions | **99.29%** (282/284) |
-| Lines | **99.91%** (1111/1112) |
+| Statements | **99.74%** (1159/1162) |
+| Branches | **97.21%** (593/610) |
+| Functions | **99.31%** (291/293) |
+| Lines | **99.91%** (1126/1127) |
 
 This is now a single honest number. Earlier revisions of this doc quoted two
 figures - a high non-UI one and a low whole-app one - because feature components
@@ -561,10 +561,13 @@ kept because each fix has a trap that invites a well-meaning revert.
 1. **`formatDateTime()` could take down the whole page.** It threw
    `RangeError: Invalid time value` on any `Contact_Date` its regex missed and
    `new Date()` could not parse (`""`, `" "`, `"not-a-date"`). It is called
-   unguarded during row render and **this app has no error boundary anywhere** -
-   no `error.tsx`, no `global-error.tsx`, no `ErrorBoundary` in `src/` - so the
-   throw escaped `ContactLogs` and hit Next's default global error screen. Now
-   guarded at both entry and the `new Date()` fallback, returning `"—"`. The DTO
+   unguarded during row render and, at the time, **the app had no error boundary
+   anywhere** - no `error.tsx`, no `global-error.tsx`, no `ErrorBoundary` in
+   `src/` - so the throw escaped `ContactLogs` and hit Next's default global
+   error screen. (Boundaries were added afterwards; see § Error boundaries. The
+   guard still matters - a boundary contains the blast radius, it does not make
+   the row render.) Now guarded at both entry and the `new Date()` fallback,
+   returning `"—"`. The DTO
    was deliberately *not* widened to `string | null`: MP's generated model has
    `Contact_Date: string` / `z.string().datetime()`, a NOT NULL column, so this is
    defence-in-depth at the formatting boundary, not a type correction. Fixing it
@@ -599,6 +602,58 @@ kept because each fix has a trap that invites a well-meaning revert.
    generic `Details` rather than the contact's name because the component is
    mounted by the layout, which has no access to page data - resolving the name
    needs a context provider, not a better regex.
+
+## Error boundaries
+
+Three boundaries, added 2026-09-13. Placement is the whole design, so it is worth
+stating why each exists rather than collapsing them into one:
+
+| File | Catches | Renders inside |
+|---|---|---|
+| `src/app/(web)/error.tsx` | anything thrown below the `(web)` layout | the app shell - Header, avatar, user menu, **sign-out** all survive |
+| `src/app/error.tsx` | `/signin`, `/session-error`, `/auth-error` | the root layout, bare (those routes have no shell) |
+| `src/app/global-error.tsx` | a throw in the root `layout.tsx` itself | nothing - it *replaces* the root layout |
+
+`error.tsx` never wraps the layout of **its own** segment. That is why a single
+boundary is not enough: `src/app/error.tsx` alone would replace the `(web)` shell
+on any page error, taking the user's sign-out with it - the same trap
+`/session-error` exists to avoid. And neither `error.tsx` catches a root-layout
+throw, which is what `global-error.tsx` is for.
+
+Things that will bite whoever edits these:
+
+- **The prop is `retry`, not `reset`.** Next 16 renamed it. `reset()` still
+  exists but only clears error state without re-fetching. A boundary wired to a
+  stale-named prop renders fine and its button silently does nothing, so each
+  boundary has a test asserting `retry` is called.
+- **They log identifiers only - never `error.message`.** These boundaries sit
+  above components that render pastoral notes, names and emails, so a render
+  error's message is not guaranteed content-free the way a controlled catch
+  block's is. Each has a test that fails if a message ever reaches the log, and
+  the structured event is `ui.render.error` with `{ boundary, name, digest }`.
+  See § Logging policy in `.claude/references/auth.md`.
+- **`global-error.tsx` imports nothing from the app** (a test enforces this by
+  reading the source), styles inline, and sets its title with React's `<title>`
+  rather than a `metadata` export, which a client component cannot have. Inline
+  styles are safe *only* because the CSP is `style-src 'self' 'unsafe-inline'`
+  with no nonce - see `.claude/references/security-headers.md`. A nonce-based
+  `style-src` would silently drop every one of them.
+
+### Testing them
+
+- **React 19 hoists `<html>`, `<body>` and `<title>` out of the render
+  container.** After `render(<GlobalError />)`, `container.querySelector("html")`
+  is `null` and the first child is the inner `<div>`, even though the component
+  returns them. Assert that structural contract with `renderToStaticMarkup` from
+  `react-dom/server`, which emits the real tags. (`document.title` *is* set, so
+  the title is asserted there.)
+- **You cannot call these components as plain functions** the way `layout.test.tsx`
+  does - they use `useEffect`, and hooks need a real render.
+- **`readFileSync(new URL("./x.tsx", import.meta.url))` fails under Vitest** with
+  `The URL must be of scheme file`; `import.meta.url` is not a file: URL there.
+  Use a cwd-relative path.
+- shadcn's `CardTitle` renders a `<div>`, not a heading, so the `(web)` boundary
+  is matched on text rather than `getByRole("heading")`.
 
 ## Test File Inventory
 
@@ -658,7 +713,10 @@ kept because each fix has a trap that invites a well-meaning revert.
 | `app/(web)/contactlookup/page.test.tsx` | 3 | Mounts `<ContactLookup>` with zero props, keeping the client shell a leaf |
 | `contexts/session-context.test.tsx` | 2 | `useAppSession` wrapper |
 | `app/(web)/home/page.test.tsx` | 2 | Unconditional redirect to `/`, never looping back to `/home` |
-| **Total** | **996** | |
+| `app/(web)/error.test.tsx` | 7 | Shell boundary: retry is called, digest shown as a reference code, and the error message reaches neither the log nor the page |
+| `app/error.test.tsx` | 6 | Root boundary for the shell-less recovery routes: retry, and a plain `/signin` link that does not depend on retrying |
+| `app/global-error.test.tsx` | 6 | Renders its own html/body (via `renderToStaticMarkup`), sets `document.title` with no metadata export, imports no app code |
+| **Total** | **1015** | |
 
 ## Ministry Platform Safety in Tests
 
