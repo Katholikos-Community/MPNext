@@ -15,24 +15,67 @@ Keep actions with their component folder when:
 - ✅ The action is **feature-specific** and only used by that component
 - ✅ The action is tightly coupled to a single feature's business logic
 
-## Examples
+## Authorization — Mandatory
 
-**Shared Actions (place here):**
-- `user.ts` - User profile operations used by contexts and components
-- `auth.ts` - Authentication actions used across the app
-- `analytics.ts` - Analytics tracking used by multiple features
-- `notifications.ts` - Notification system used app-wide
+A compiled server action is a callable POST endpoint. A session proves only that *some*
+Ministry Platform user signed in; all MP data is fetched with the app's service account,
+so the security-role gate is the only thing deciding who may read or change it.
+
+Any action that touches MP data must call
+`AuthorizationService.getInstance().requireSecurityRole({ table, operation })` — for reads
+as well as writes — and never a bare `auth.api.getSession()` check:
+
+```typescript
+import { AuthorizationService } from '@/services/authorizationService';
+
+await AuthorizationService.getInstance().requireSecurityRole({
+  table: 'Contacts',
+  operation: 'read',
+});
+```
+
+`requireSecurityRole` throws `UnauthorizedError` on refusal and returns the acting MP
+`User_ID` on success, so it also supplies `$userId` attribution for writes. It implies an
+authenticated session, so no separate session check is needed alongside it.
+`hasSecurityRole` is the non-throwing form — use it only to compute UI affordances, never
+as the enforcement point. See [`.claude/references/auth.md`](../../../.claude/references/auth.md)
+§ Authorization.
+
+The two narrow exceptions in this folder are documented inline in the source: an action
+that returns only the caller's own profile, and one that returns a single domain-wide
+configuration string.
+
+## Current Shared Actions
+
+| File | Action | Signature | Gate |
+|------|--------|-----------|------|
+| `user.ts` | `getCurrentUserProfile` | `(): Promise<MPUserProfile \| undefined>` | Authenticated session; also computes `canAccessContactFeatures` via `hasSecurityRole` |
+| `domain.ts` | `getMpTimezone` | `(): Promise<string>` | Authenticated session |
+
+`getCurrentUserProfile` takes no parameters by design — the `User_GUID` is read from the
+session rather than accepted from the caller, because the profile also discloses roles and
+user groups. It requires only an authenticated session, since any MP user may sign in and
+must be able to load the app shell (avatar, name, sign-out menu) with no security role.
+The returned `canAccessContactFeatures` flag is **UX only, not a security control**; the
+client must never derive policy from `roles`.
+
+`getMpTimezone` returns the domain's IANA time zone identifier for client-side
+`Intl.DateTimeFormat` rendering of MP datetimes. A session check is sufficient here rather
+than the full role gate: the value is one domain-wide configuration string, not per-person
+data, and its only consumer is the already role-gated contact detail page.
 
 **Feature-Specific Actions (keep co-located):**
-- `components/contact-lookup/actions.ts` - Contact search functionality
-- `components/user-menu/actions.ts` - Sign-out and user menu operations
+- `components/contact-lookup/actions.ts` - Contact search
 - `components/contact-lookup-details/actions.ts` - Contact detail fetching
+- `components/contact-logs/actions.ts` - Contact log CRUD
+- `components/user-menu/actions.ts` - Sign-out
 
 ## Usage
 
 ```typescript
 // Importing shared actions
-import { trackEvent } from '@/components/shared-actions/analytics';
+import { getCurrentUserProfile } from '@/components/shared-actions/user';
+import { getMpTimezone } from '@/components/shared-actions/domain';
 
 // Importing feature-specific actions
 import { searchContacts } from './actions'; // Within same folder
