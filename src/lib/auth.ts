@@ -251,6 +251,37 @@ const options = {
           // so this can likely be flipped to `true` — but that is a separate,
           // separately-testable change from the 1.7 migration itself.
           pkce: false,
+          // Ministry Platform does not echo the `nonce` back in the id_token,
+          // so better-auth's nonce binding must be switched off or NO ONE CAN
+          // SIGN IN.
+          //
+          // better-auth 1.7 turns nonce binding on automatically for any
+          // provider whose discovery document yields an id_token config
+          // (`requiresIdTokenNonce`), sends a `nonce` on the authorize request,
+          // and then requires the claim to come back:
+          // `nonceMatches()` returns false when the claim is absent
+          // (`typeof claimNonce !== "string"`). MP omits it, so verification
+          // failed every time with `unable_to_get_user_info` and the log line
+          // "id_token failed verification against the discovery JWKS or
+          // expected nonce". Verified 2026-09-12 by decoding a real MP
+          // id_token: kid, alg, iss and aud all matched; only `nonce` was
+          // missing.
+          //
+          // This looked intermittent, which sent the investigation sideways for
+          // a while. The reason is inverted from the obvious one: sign-in
+          // SUCCEEDED only when the boot-time discovery fetch had failed, since
+          // that leaves the id_token config undefined and skips verification
+          // altogether. A working discovery meant a broken sign-in.
+          //
+          // What this does NOT give up: the id_token signature is still checked
+          // against MP's JWKS, and the issuer and audience are still checked.
+          // What it does give up: binding the id_token to this particular
+          // authorization request. The residual risk is id_token replay/
+          // injection, mitigated by the OAuth `state` cookie check that still
+          // runs, and by this being a confidential client that exchanges the
+          // code with a client secret. Enabling PKCE (F8) would narrow it
+          // further and is the natural follow-up.
+          disableIdTokenNonceBinding: true,
           authorizationUrlParams: {
             realm: "realm",
           },
