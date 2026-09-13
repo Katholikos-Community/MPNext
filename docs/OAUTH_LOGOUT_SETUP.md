@@ -1,137 +1,125 @@
 # OAuth Logout Configuration for Ministry Platform
 
 ## Current Status
-✅ Basic sign-out implemented using Better Auth server action
-✅ OIDC RP-initiated logout configured
+✅ Server-side sign-out via the `handleSignOut()` server action
+✅ OIDC RP-initiated logout implemented (Option A below)
+⚠️ Requires a **Post-Logout Redirect URI** registered on the MP OAuth client
 
 ## What's Working
-- Application-level session termination via `signOut()` server action
-- Better Auth clears local session cookies
-- User is logged out of the Next.js application
-- OIDC RP-initiated logout ends Ministry Platform OAuth session
+- Better Auth session cookie cleared server-side by `auth.api.signOut()`
+- The browser is then redirected to Ministry Platform's `end_session` endpoint,
+  which ends the MP OAuth (SSO) session
+- MP redirects back to the app, which now has no session, so `src/proxy.ts`
+  sends the user to `/signin`
 
-## What's Missing (For Complete OIDC Logout)
+## Implementation
 
-### 1. Ministry Platform OAuth Configuration
-You need to register **Post-Logout Redirect URIs** in your Ministry Platform OAuth client settings:
-
-**Production:**
-```
-https://yourdomain.com/
-https://yourdomain.com/signin
-```
-
-**Development:**
-```
-http://localhost:3000/
-http://localhost:3000/signin
-```
-
-### 2. Implementation Details
-
-#### OIDC RP-Initiated Logout Flow:
-When a user clicks "Sign out", the current implementation:
-1. ✅ Destroys Better Auth session (JWT)
-2. ❌ Does NOT notify Ministry Platform to end the OAuth session
-
-#### To implement full logout:
-The `signOut()` function should redirect to Ministry Platform's end_session endpoint:
-
-```
-${MINISTRY_PLATFORM_BASE_URL}/oauth/connect/endsession?
-  id_token_hint={ID_TOKEN}&
-  post_logout_redirect_uri={YOUR_APP_URL}
-```
-
-**Why this matters:**
-- Without OIDC logout, users remain authenticated at Ministry Platform
-- If they click "Sign in" again, they're auto-logged back in (SSO)
-- True logout requires ending the session at both application AND identity provider
-
-### 3. Required Changes
-
-#### Store ID Token in JWT Callback:
-Already implemented in `src/auth.ts`:
-```typescript
-idToken: account.id_token,  // ✅ Line 63
-```
-
-#### Option A: Redirect-based logout (Recommended)
-Modify `signOut()` to use `redirect` parameter:
+All of it lives in `src/components/user-menu/actions.ts`:
 
 ```typescript
-// In user-menu/actions.ts
+'use server';
+
 export async function handleSignOut() {
-  const mpOauthUrl = `${process.env.MINISTRY_PLATFORM_BASE_URL}/oauth`;
-  const endSessionUrl = `${mpOauthUrl}/connect/endsession`;
-  
-  // Get current session to extract id_token
-  const session = await auth();
-  const idToken = session?.idToken;
+  // Clear the Better Auth session
+  await auth.api.signOut({ headers: await headers() });
 
-  const params = new URLSearchParams({
-    post_logout_redirect_uri: process.env.BETTER_AUTH_URL || process.env.NEXTAUTH_URL || 'http://localhost:3000',
-  });
-  
-  if (idToken) {
-    params.append('id_token_hint', idToken);
+  const baseUrl = process.env.MINISTRY_PLATFORM_BASE_URL;
+  if (!baseUrl) {
+    throw new Error('MINISTRY_PLATFORM_BASE_URL is not configured');
   }
-  
-  // Sign out of Better Auth first
-  await signOut({
-    redirect: false  // Don't redirect yet
+
+  const endSessionUrl = `${baseUrl}/oauth/connect/endsession`;
+  const params = new URLSearchParams({
+    post_logout_redirect_uri:
+      process.env.BETTER_AUTH_URL || process.env.NEXTAUTH_URL || 'http://localhost:3000',
   });
-  
-  // Then redirect to MP's end_session endpoint
+
   redirect(`${endSessionUrl}?${params.toString()}`);
 }
 ```
 
-#### Option B: Simple logout
-Local-only logout of Better Auth. This is acceptable if:
-- You don't need to clear Ministry Platform session
-- Users are okay with auto-login on next visit (SSO behavior)
+Callers: the user menu (`src/components/user-menu/user-menu.tsx`) and the
+broken-session recovery page (`src/app/session-error/page.tsx`), which wires it to
+a plain `<form action={handleSignOut}>` so a user with an unusable session can
+still get out.
 
-### 4. Environment Variables
-Ensure these are set:
+### Sign-out is server-side only
+
+`POST /api/auth/sign-out` is **not** in `allowedAuthRoutes`
+(`src/app/api/auth/[...all]/route.ts`), so `authClient.signOut()` from the
+browser returns 404. That is deliberate: sign-out runs in-process through
+`auth.api.signOut()`, so no HTTP sign-out route is needed, and the 404 makes an
+accidental client-side call loud instead of a silent no-op. If a client-side
+sign-out is ever genuinely required, add the path to the allowlist first.
+
+### No `id_token_hint`
+
+The end-session URL carries only `post_logout_redirect_uri`. `id_token_hint` is
+optional in the OIDC RP-initiated logout spec, and MP accepts the request
+without it.
+
+Better Auth 1.7 *can* build this URL itself — MP's discovery document exposes
+`end_session_endpoint`, and `auth.api.signOut()` now returns a `url` that
+includes `id_token_hint`. `handleSignOut()` ignores that return value and
+constructs the URL by hand. That is a known, deliberate simplification left out
+of the 1.7 migration, not an oversight; see
+`.claude/references/auth.md` § Better Auth 1.7 migration notes.
+
+## Ministry Platform OAuth Configuration
+
+Register **Post-Logout Redirect URIs** on the MP OAuth client (the one named by
+`OIDC_CLIENT_ID`). The value sent is `BETTER_AUTH_URL` verbatim — an origin with
+**no trailing slash and no path** — so that exact string must be registered.
+
+**Production:**
+```
+https://yourdomain.com
+```
+
+**Development:**
+```
+http://localhost:3000
+```
+
+Without this, MP rejects the `post_logout_redirect_uri` and the user is left on
+an MP error page, or is auto-logged back in on the next sign-in (SSO behavior).
+
+## Environment Variables
 
 ```env
-MINISTRY_PLATFORM_BASE_URL=https://your-mp-instance.com
+MINISTRY_PLATFORM_BASE_URL=https://your-mp-instance.com/ministryplatformapi
 BETTER_AUTH_URL=https://yourdomain.com  # Production
 BETTER_AUTH_URL=http://localhost:3000   # Development
 ```
 
-### 5. Testing
+`handleSignOut()` throws if `MINISTRY_PLATFORM_BASE_URL` is unset.
+`BETTER_AUTH_URL` falls back to `NEXTAUTH_URL`, then to `http://localhost:3000`
+— in production, set `BETTER_AUTH_URL` explicitly, or sign-out will try to send
+users to localhost.
 
-**Test basic logout:**
-1. Sign in to application
-2. Click "Sign out"
-3. Verify you're redirected and session is cleared
-4. Try accessing protected route - should redirect to signin
+## Testing
 
-**Test OIDC logout (if implemented):**
-1. Sign in to application
+Unit coverage: `src/components/user-menu/actions.test.ts` pins the
+`auth.api.signOut` call, the end-session redirect, the `NEXTAUTH_URL` and
+localhost fallbacks, and the missing-`MINISTRY_PLATFORM_BASE_URL` throw.
+
+**Manual (the only thing that exercises MP):**
+1. Sign in to the application
 2. Click "Sign out"
-3. Should redirect to Ministry Platform briefly
-4. Then redirect back to your app
-5. Try signing in again - should require credentials (not auto-login)
+3. You should bounce through Ministry Platform briefly, then back to the app
+4. You land on `/signin`, which immediately restarts the OAuth flow
+5. MP should now ask for credentials rather than signing you straight back in —
+   if it does not, the MP session was not ended (check the post-logout redirect
+   URI registration)
 
 ## References
 - [OpenID Connect RP-Initiated Logout Spec](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
 - [Better Auth Documentation](https://www.better-auth.com/docs)
+- [Auth Reference](../.claude/references/auth.md) — § Logout Flow
 
-## Decision Required
+## Alternative considered: local-only logout
 
-Choose implementation based on your requirements:
-
-**Option A (Full OIDC Logout):**
-- Pros: True logout from identity provider, no auto-login
-- Cons: More complex, requires Ministry Platform configuration
-- Use when: Security requires clearing all sessions
-
-**Option B (Local Logout Only - Current):**
-- Pros: Simpler, works immediately
-- Cons: SSO session remains, users auto-login
-- Use when: SSO convenience is preferred
-
-Currently implemented: **Option A (Full OIDC Logout)**
+Clearing only the Better Auth cookie and skipping the MP end-session redirect is
+simpler, but leaves the MP SSO session alive — the next visit to `/signin`
+signs the user straight back in without a credential prompt. **Not used here.**
+Sign-out must mean signed out at both the application and the identity provider.

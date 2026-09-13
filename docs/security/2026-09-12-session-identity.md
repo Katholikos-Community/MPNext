@@ -133,6 +133,18 @@ account management and calls none of them.
 that the paths 404 — plus a control proving a non-disabled path still routes, so
 the suite cannot pass vacuously. Removing either protection fails the build.
 
+### Since hardened further
+
+`91d226f` (2026-09-12, after the fix) added a **deny-by-default allowlist** in
+`src/app/api/auth/[...all]/route.ts`: only `GET /get-session`,
+`GET /callback/ministry-platform` and `POST /sign-in/social` reach
+`auth.handler` at all; everything else 404s at the HTTP boundary, including any
+endpoint a future Better Auth version adds. `disabledPaths` remains as defense
+in depth, and is still what `src/auth.test.ts` exercises (that suite drives
+`auth.handler` directly, bypassing Next.js routing). **The allowlist is an
+addition, not a replacement — do not drop `disabledPaths` on the strength of
+it.** A fork that takes only `436466d` is fully patched for this advisory.
+
 ## After patching
 
 **Closing the endpoint stops new forgeries. It does not revoke one already minted
@@ -154,14 +166,15 @@ database there is no server-side session store to clear.
 | Date | Event |
 |---|---|
 | 2026-02-20 | `bf0bd13` — Better Auth migration. `userGuid` declared `input: false`; `/update-user` answers `400 — userGuid is not allowed to be set`. **Not vulnerable.** |
+| 2026-05-16 | `473967d` — an unrelated dependency upgrade takes better-auth 1.5.5 → 1.6.11 in the lockfile. 1.6 strips `input: false` provider-profile fields; **sign-in breaks**. Broken, not vulnerable. |
 | 2026-05-21 | `9fc6427` — MP write attribution resolves `User_ID` from the session. Loads the audit-forgery impact; field still not writable. |
-| 2026-07-09 | `720f39d` — Better Auth 1.5.5 → 1.6.23. 1.6 strips `input: false` provider-profile fields; **sign-in breaks**. Broken, not vulnerable. |
+| 2026-07-09 | `720f39d` — lockfile security sweep, better-auth 1.6.11 → 1.6.23. The 1.6 `input` semantics are now noticed. |
 | 2026-07-09 | `c9d80d4` — `userGuid` flipped to `input: true` to repair sign-in. Correct diagnosis, but the endpoint that the flag had been implicitly guarding since February was left open. **Vulnerability introduced.** |
 | 2026-09-12 | Reported privately by a downstream maintainer. |
 | 2026-09-12 | `436466d` — endpoint closed; regression tests added. **Fixed.** |
 
 Exposure window: **2026-07-09 → 2026-09-12** (65 days), across Better Auth
-1.6.23, 1.7.1, 1.7.2 and 1.7.4.
+1.6.23, 1.7.1 and 1.7.2. (The tree moved to 1.7.4 in `e02eec3`, *after* the fix.)
 
 ## Root cause
 

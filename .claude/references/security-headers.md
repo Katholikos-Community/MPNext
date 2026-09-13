@@ -45,6 +45,31 @@ runtime-injected `<style>` and broke the contact-log dialog with React error
 against a production build — `next dev` has deliberate relaxations
 (`'unsafe-eval'`, `ws:`) that hide violations.
 
+## The policy, directive by directive
+
+| Directive | Value | Note |
+|---|---|---|
+| `default-src` | `'self'` | |
+| `script-src` | `'self' 'nonce-…' 'strict-dynamic'` (+ `'unsafe-eval'` in dev) | `strict-dynamic` makes CSP3 browsers ignore the allow-list and trust whatever the nonced bootstrap loads, so Next's chunks work without naming each one; `'self'` is the fallback for browsers that ignore `strict-dynamic`. |
+| `style-src` | `'self' 'unsafe-inline'` | Deliberate, in dev *and* production — see below. |
+| `img-src` | `'self' data: blob:` + MP file origin | `data:`/`blob:` are `next/image`'s placeholder and preview machinery. |
+| `font-src` | `'self'` | `next/font` self-hosts Geist under `/_next/static`; there is no Google Fonts origin to allow. |
+| `connect-src` | `'self'` (+ `ws:` in dev) | Every MP call is server-side; the browser only ever talks to this origin. `ws:` is HMR. |
+| `object-src` | `'none'` | |
+| `frame-src` | `'none'` | |
+| `base-uri` | `'self'` | Stops an injected `<base>` re-pointing every relative URL on the page. |
+| `form-action` | `'self'` + MP OAuth origin | See below. |
+| `frame-ancestors` | `'none'` | |
+| `upgrade-insecure-requests` | present | Production only, **and** omitted whenever the policy is report-only — browsers refuse to honor it there and log an error on every page, burying the reports report-only exists to surface. |
+
+The two origins come from `NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL` (`img-src`)
+and `MINISTRY_PLATFORM_BASE_URL` (`form-action`), reduced with `originOf()`,
+which returns `null` for a missing or malformed value rather than throwing —
+the directive narrows, the request path never 500s.
+
+There is no `style-src-attr` (dropped as redundant) and no `report-uri`/
+`report-to`: violations surface in the browser console only.
+
 ## Deliberate loosenings — do not "tighten" these
 
 - **`style-src 'self' 'unsafe-inline'`, with NO nonce** — Radix's dialog pulls
@@ -73,9 +98,13 @@ against a production build — `next dev` has deliberate relaxations
   Platform. Without the origin from
   `NEXT_PUBLIC_MINISTRY_PLATFORM_FILE_URL`, every avatar breaks.
 
-Dev-only relaxations (`'unsafe-eval'`, `'unsafe-inline'` styles, `ws:`, and
-omitting `upgrade-insecure-requests`) are gated on `NODE_ENV === 'development'`
-and never reach a production build.
+The dev-only relaxations are exactly two — `'unsafe-eval'` in `script-src` and
+`ws:` in `connect-src` — both gated on `NODE_ENV === 'development'`, so neither
+reaches a production build. `'unsafe-inline'` in `style-src` is **not** one of
+them: it is identical in dev and in production, and a test pins that. The only
+other environment difference is `upgrade-insecure-requests` — present in
+production, absent in dev, and absent in report-only mode whatever the
+environment. Everything else is byte-identical across all four combinations.
 
 ## Nonces force dynamic rendering
 
@@ -95,8 +124,9 @@ Two consequences:
    page.test.tsx` pins both facts.
 2. **Check the build output after adding a route.** Anything printed with `○`
    is prerendered and will not hydrate under an enforced CSP. Every app route
-   is currently `ƒ` except `/_next`-internal `/_not-found`, which is Next's
-   built-in 404: it renders its HTML but will not hydrate under enforcement.
+   is currently `ƒ` (verified against a production build, 2026-09-12) except
+   Next's built-in `/_not-found`, which is `○`: it renders its HTML but will
+   not hydrate under enforcement.
    It has no interactivity to lose, so this is accepted rather than fixed; a
    custom `src/app/not-found.tsx` server component would close it if the 404
    ever needs client behavior.
@@ -104,7 +134,10 @@ Two consequences:
 ## Tests
 
 - `src/lib/security-headers.test.ts` — every directive and both sides of every
-  branch (dev/prod, origin present/absent, enforce/report).
+  branch (dev/prod, origin present/absent, enforce/report), plus two guards
+  that encode the traps above: a nonce must never appear in `style-src`, and
+  the report-only policy must be identical to the enforced one apart from
+  `upgrade-insecure-requests`.
 - `src/lib/next-config-headers.test.ts` — the config actually attaches the
   static headers to `/(.*)`, and does *not* set a second CSP.
 - `src/proxy.test.ts` § Content-Security-Policy — the header on every return

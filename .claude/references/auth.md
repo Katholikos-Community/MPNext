@@ -4,7 +4,7 @@ This document provides detailed context about the authentication system for LLM 
 
 ## Overview
 
-MPNext uses **Better Auth** with the **genericOAuth** plugin to authenticate users against Ministry Platform's OIDC endpoints. Sessions are stateless (JWT cookie cache, no database). User profiles are loaded client-side by `UserProvider`.
+MPNext uses **Better Auth** with the **genericOAuth** plugin to authenticate users against Ministry Platform's OIDC endpoints. Sessions are stateless (JWT cookie cache, no database). The full MP user profile is loaded client-side by `UserProvider`; the only thing the session itself resolves server-side is the MP `User_ID` (see [customSession Callback](#customsession-callback)).
 
 ## Critical: user.id vs userGuid
 
@@ -18,6 +18,7 @@ The MP User_GUID (the OAuth `sub` claim) is stored as `user.userGuid` via `addit
 | `session.user.userGuid` | MP User_GUID (UUID) | All MP API lookups (`dp_Users`, profile fetching) |
 | `session.user.email` | **Synthetic** — `<sub>@mp.invalid` | Nothing. Never display it or send mail to it. Exists only to satisfy better-auth's `required, unique` email column. |
 | `session.user.mpEmail` | Real MP email, or `null` | Display fallbacks (e.g. the header tooltip). MP does not require an email, so always handle `null`. |
+| `session.user.userId` | MP `User_ID` (number), or `null` | Audit attribution (`$userId`) and the authorization gate. Resolved from `userGuid` by `customSession`; read it through `SessionContextService`, not inline. |
 
 **Why?** Better Auth explicitly strips the `id` from `getUserInfo` when creating user records (`const { id: _, ...restUserInfo } = userInfo` in `link-account.mjs`). The `id` becomes the `accountId` in the account table, not `user.id`.
 
@@ -49,8 +50,10 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 | `src/components/layout/auth-wrapper.tsx` | Server guard for the (web) group — redirects to `/signin` (no session) or `/session-error` (session without `userGuid`). Authentication only; it does **not** check roles |
 | `src/app/session-error/page.tsx` | Recovery page for broken sessions — provides a sign-out even when the header/menu can't render (outside the (web) group, so not self-guarded) |
 | `src/components/user-menu/actions.ts` | `handleSignOut()` — OIDC logout flow |
-| `src/app/signin/page.tsx` | Sign-in page — auto-redirects to OAuth; sanitizes `callbackUrl` to a same-origin relative path (see [Authorization](#authorization-distinct-from-authentication)) |
+| `src/app/signin/page.tsx` | Sign-in **route** — a server component whose only job is `export const dynamic = "force-dynamic"` (route segment config is ignored in a `"use client"` file, and the nonce-based CSP needs a per-request render) and rendering `<SignIn />` |
+| `src/components/sign-in/sign-in.tsx` | The sign-in page body — auto-redirects to OAuth exactly once per page load (ref guard), and sanitizes `callbackUrl` to a same-origin relative path (see [Open redirect on `/signin`](#open-redirect-on-signin-f3-closed-2026-09-12)) |
 | `src/services/authorizationService.ts` | The **authorization** gate — MP security-role check for reads and writes |
+| `src/services/sessionContextService.ts` | Resolves the acting MP `User_ID` from the session (`getCurrentUserId`, `getActingUserIdForWrite`) — the single source the gate reads |
 | `src/app/(web)/contactlookup/layout.tsx` | Page-layer gate over `/contactlookup/**` — redirects a role-less user to `/no-access` |
 | `src/app/(web)/no-access/page.tsx` | "You need a security role" page. **Inside** the (web) group, so the header and sign-out still render |
 
@@ -61,7 +64,7 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 | Plugin | Purpose |
 |--------|---------|
 | `genericOAuth` | Ministry Platform OAuth provider config |
-| `customSession` | Adds `firstName`/`lastName` (name splitting only, no API calls) |
+| `customSession` | Adds `firstName`/`lastName` (name splitting) and `userId` (MP `User_ID`, resolved from `dp_Users` and process-cached) |
 | `nextCookies` | Next.js cookie integration |
 
 ### Session Strategy
@@ -148,8 +151,10 @@ The cast is needed because `customSessionClient` type inference doesn't include 
 |---------|-------|-------|
 | `providerId` | `"ministry-platform"` | Used in OAuth URLs and `signIn.social({ provider })` |
 | `discoveryUrl` | `${MP_BASE_URL}/oauth/.well-known/openid-configuration` | OIDC auto-discovery |
-| `scopes` | `openid`, `offline_access`, `dataplatform/scopes/all` | Full MP API access |
+| `scopes` | `openid`, `offline_access`, `http://www.thinkministry.com/dataplatform/scopes/all` | Full MP API access. The third scope is the literal URI MP expects, not a short name |
 | `pkce` | `false` | Explicitly disabled — 1.7 defaults this to `true` (see 1.7 notes below) |
+| `disableIdTokenNonceBinding` | `true` | **Required.** MP does not echo `nonce` back in the `id_token`, and better-auth rejects a missing claim. See [`nonce` binding is off](#nonce-binding-is-off-and-must-stay-off) |
+| `authorizationUrlParams` | `{ realm: "realm" }` | Extra query parameter MP's authorize endpoint expects |
 | `getUserInfo` | Custom callback | Fetches OIDC userinfo; validates `sub` with `sanitizeGuid` and returns `null` (sign-in refused) if unusable; returns the real `email` on the raw profile and `emailVerified: profile.email_verified === true` (not hardcoded — see [Account linking](#account-linking-disabled)) |
 | `mapProfileToUser` | Custom callback | Returns `userGuid: sub`, `email: <sub>@mp.invalid` (synthetic — see [Email is never a key](#email-is-never-a-key-synthetic-email-real-address-in-mpemail)), `mpEmail: real address or null`; throws if `sub` is absent |
 
@@ -161,13 +166,13 @@ way it does:
 
 | Change | What we do |
 |--------|-----------|
-| `signIn.oauth2()` removed | `src/app/signin/page.tsx` calls `authClient.signIn.social({ provider: "ministry-platform" })` |
+| `signIn.oauth2()` removed | `src/components/sign-in/sign-in.tsx` calls `authClient.signIn.social({ provider: "ministry-platform" })` |
 | `genericOAuthClient()` dropped | Removed from `src/lib/auth-client.ts`; only `customSessionClient` remains |
 | **Callback path moved** | `/api/auth/oauth2/callback/ministry-platform` → **`/api/auth/callback/ministry-platform`**. This URL must be registered as a redirect URI on the MP OAuth client (`OIDC_CLIENT_ID`) for every environment. |
 | Account identity keyed on `(issuer, accountId)` | **Reverted in 1.7.3** — back to `(providerId, accountId)`, and `accountIssuer` was removed. See [Version Notes](#173--account-identity-reverted-breaking). |
 | Account subject no longer falls back to `id` | `getUserInfo` returns `sub` (see below) |
-| `pkce` defaults to `true` | Kept explicitly `false`; MP discovery *does* advertise `S256`, so this is a candidate follow-up |
-| ID tokens verified against provider JWKS | Automatic — MP publishes `jwks_uri`; also enables `nonce` binding |
+| `pkce` defaults to `true` | Kept explicitly `false`; MP discovery *does* advertise `S256`, so enabling it is the open follow-up (F8) |
+| ID tokens verified against provider JWKS | Automatic — MP publishes `jwks_uri`. It also turns on `nonce` binding, which MP cannot satisfy, so `disableIdTokenNonceBinding: true` is set (below) |
 
 > ⚠️ **`getUserInfo` must return `sub`, not `id`.** MP's discovery document
 > advertises `id_token_signing_alg_values_supported`, so Better Auth treats the
@@ -185,19 +190,42 @@ way it does:
 > every existing user silently becomes a new account. Details and the resulting
 > `>= 1.7.3` version floor: [Version Notes](#173--account-identity-reverted-breaking).
 
-> ℹ️ **`nonce` binding is now on.** Because MP publishes a `jwks_uri`, Better
-> Auth sends a server-generated `nonce` and rejects a callback whose `id_token`
-> does not echo it (OIDC Core §3.1.3.7). If MP ever stops returning the `nonce`
-> claim, sign-in fails with an `id_token failed verification` error; the escape
-> hatch is `disableIdTokenNonceBinding: true`, which removes `id_token` replay
-> protection.
-
 > ℹ️ **RP-initiated logout is available but unused.** MP's discovery document
 > exposes `end_session_endpoint`, so 1.7 can build the provider logout URL
 > itself (including `id_token_hint`, which our hand-rolled URL omits).
 > `handleSignOut()` still constructs the URL manually and ignores the `url` that
 > `auth.api.signOut()` now returns — a possible simplification, deliberately
 > left out of the 1.7 migration.
+
+#### `nonce` binding is off, and must stay off
+
+> ⚠️ **`disableIdTokenNonceBinding: true` is load-bearing — do not remove it.**
+> Because MP publishes a `jwks_uri`, better-auth 1.7 derives an id_token config
+> from discovery, sets `requiresIdTokenNonce`, sends a server-generated `nonce`
+> on the authorize request and then requires the claim back (OIDC Core
+> §3.1.3.7). **Ministry Platform does not return it.** `nonceMatches()` treats
+> an absent claim as a mismatch, so every sign-in failed with
+> `/auth-error?error=unable_to_get_user_info` and the server log line
+> `id_token failed verification against the discovery JWKS or expected nonce`.
+> Verified 2026-09-12 by decoding a real MP id_token: `kid`, `alg`, `iss` and
+> `aud` all matched; only `nonce` was missing. Fixed in `f88a9f1`.
+>
+> It looked intermittent, and the reason is inverted from the obvious one:
+> sign-in **succeeded** only when the boot-time discovery fetch had failed,
+> because that leaves the id_token config undefined and skips verification
+> entirely. A working discovery meant a broken sign-in.
+>
+> **What is still checked:** the id_token signature against MP's JWKS, plus
+> `iss` and `aud`. **What is given up:** binding the id_token to this particular
+> authorization request. Residual risk is id_token replay/injection, mitigated
+> by the OAuth `state` cookie check that still runs and by this being a
+> confidential client that exchanges the code with a client secret. Enabling
+> PKCE (F8) would narrow it further and is the natural follow-up.
+>
+> **Not currently pinned by a test.** `src/auth.test.ts` asserts `pkce`,
+> `providerId`, `scopes` and `authorizationUrlParams`, but nothing asserts
+> `disableIdTokenNonceBinding`, so a config edit that drops it fails only at a
+> real sign-in. Worth adding to that config assertion.
 
 ### User Additional Fields
 
@@ -207,8 +235,13 @@ user: {
   additionalFields: {
     userGuid: {
       type: "string",
-      required: false,
-      input: true,  // MUST be true — see warning below
+      required: true,  // parseInputData rejects user creation without it
+      input: true,     // MUST be true — see warning below
+    },
+    mpEmail: {
+      type: "string",
+      required: false, // MP does not require an email; sign-in must not depend on one
+      input: true,
     },
   },
 }
@@ -302,20 +335,41 @@ be set`.
 
 ### customSession Callback
 
-The `customSession` callback only does lightweight name splitting. It does **not** make any API calls. Profile loading is handled by `UserProvider` on the client side.
+The callback delegates to `enrichSessionUser`, exported from `src/lib/auth.ts` so it
+can be unit tested (the plugin closes over its callback and never exposes it). It does
+name splitting **and** one MP lookup: the acting user's `User_ID`.
 
 ```typescript
-customSession(async ({ user, session }) => ({
-  user: {
-    ...user,
-    firstName: user.name?.split(" ")[0] || "",
-    lastName: user.name?.split(" ").slice(1).join(" ") || "",
-  },
-  session,
-}), options)
+// src/lib/auth.ts
+export async function enrichSessionUser(user, session) {
+  const userGuid = user.userGuid;
+  const userId = userGuid ? await resolveMpUserId(userGuid) : null;
+  return {
+    user: {
+      ...user,
+      firstName: user.name?.split(" ")[0] || "",
+      lastName: user.name?.split(" ").slice(1).join(" ") || "",
+      userId,
+    },
+    session,
+  };
+}
+
+customSession(async ({ user, session }) => enrichSessionUser(user, session), options)
 ```
 
-**Why no API calls in customSession?** It runs on every `getSession()` call when the cookie cache expires. Making MP API calls here would be slow and fragile.
+**Why `userId` is resolved here.** MP's audit log keys on the `$userId` passed to write
+APIs, and the authorization gate needs the same value. Baking it into the session means
+`SessionContextService` can read it without a `dp_Users` round-trip on every request.
+
+**Why that is the *only* API call.** `customSession` runs on every `getSession()` once
+the cookie cache expires, so anything expensive here is paid constantly.
+`resolveMpUserId` is guarded by a process-wide `Map<User_GUID, User_ID>`
+(`userIdCache`) — the mapping is stable per user, so it costs at most one MP call per
+(user × container). A failed lookup is **not** cached and never blocks session
+creation: it logs and returns `userId: null`, which the write path then surfaces as
+`mp.write.non_user` and the gate refuses as `no_mp_user`. The full MP profile (name,
+photo, roles, groups) is still loaded client-side by `UserProvider`, not here.
 
 ## Auth Client (`src/lib/auth-client.ts`)
 
@@ -340,7 +394,7 @@ export const authClient = createAuthClient({
 | `authClient.useSession()` | React hook — returns `{ data: session, isPending }` |
 | `authClient.getSession()` | Async — returns `{ data: session }` |
 | `authClient.signIn.social({ provider, callbackURL })` | Initiates OAuth flow (was `signIn.oauth2({ providerId })` before 1.7) |
-| `authClient.signOut()` | Clears local session (use `handleSignOut` for full OIDC logout) |
+| `authClient.signOut()` | **Not usable** — `POST /sign-out` is not in the route allowlist, so it 404s. Use the `handleSignOut` server action (full OIDC logout) |
 
 ## OAuth Flow
 
@@ -353,33 +407,42 @@ export const authClient = createAuthClient({
    registered as a redirect URI on the MP OAuth client)
 5. Better Auth:
    a. Exchanges code for tokens
-   b. Verifies the id_token against MP's JWKS and the expected nonce
+   b. Validates the oauth_state cookie, then verifies the id_token signature,
+      iss and aud against MP's JWKS (nonce binding is disabled — MP omits it)
    c. Calls getUserInfo(tokens) → fetches OIDC profile → returns { sub, ... }
-   d. Calls mapProfileToUser(profile) → returns { userGuid: profile.sub }
+      (returns null, refusing sign-in, if sub is missing or malformed)
+   d. Calls mapProfileToUser(profile) → { userGuid: sub, email: <sub>@mp.invalid,
+      mpEmail: real address or null }
    e. Resolves the account subject from profile.sub (OIDC default)
-   f. Creates user record (id=generated, userGuid=sub, email, name)
-   g. Creates account record (issuer=MP issuer, accountId=sub, tokens)
-   h. Creates session → sets JWT cookie
+   f. Creates user record (id=generated, userGuid=sub, synthetic email, mpEmail, name)
+   g. Creates account record (providerId="ministry-platform", accountId=sub, tokens)
+   h. customSession resolves userId from dp_Users, then creates the session →
+      sets JWT cookie
 6. Redirect to callbackURL → app loads with session
-7. UserProvider calls getCurrentUserProfile(userGuid) → loads MP profile
+7. UserProvider calls getCurrentUserProfile() → loads MP profile (userGuid comes
+   from the session, never from the caller)
 ```
 
 ### /signin must start exactly ONE OAuth flow
 
 Step 2 is not idempotent and must never run twice for one page load.
 
-Nonce binding is on for this provider (`requiresIdTokenNonce` is true whenever
-discovery supplies an id_token config and `disableIdTokenNonceBinding` is
-unset), and `account.storeStateStrategy` is `"cookie"`. So each
-`signIn.social()` call mints its own `state` + id_token `nonce` and overwrites
-the single `oauth_state` cookie that step 5b validates against. Two calls race,
-only the last cookie written can win, and the loser's id_token fails
-verification — surfacing as `/auth-error?error=unable_to_get_user_info` with
-`id_token failed verification against the discovery JWKS or expected nonce` in
-the server log. It is intermittent, which makes it look like an MP or network
-problem rather than a client bug.
+`account.storeStateStrategy` is `"cookie"`, so each `signIn.social()` call mints
+its own `state` and overwrites the single `oauth_state` cookie that step 5b
+validates against. Two calls race, only the last cookie written can win, and the
+loser's callback fails validation. It is intermittent, which makes it look like
+an MP or network problem rather than a client bug.
 
-This actually happened (2026-09-12). The guard in `src/components/sign-in/`
+When this was found (2026-09-12), nonce binding was still on as well, so each
+call also minted a competing id_token `nonce` and the failure surfaced as
+`/auth-error?error=unable_to_get_user_info` with `id_token failed verification
+against the discovery JWKS or expected nonce` in the server log. Nonce binding
+has since been disabled (MP never sent the claim — see
+[`nonce` binding is off](#nonce-binding-is-off-and-must-stay-off)), but the
+`state` race is independent of it and the guard is still required.
+
+This actually happened (2026-09-12, fixed in `d201b10`). The guard in
+`src/components/sign-in/sign-in.tsx`
 was a `useState` flag read *inside* the `getSession()` callback, with the state
 in the effect's dep array. React StrictMode double-invokes effects in dev: both
 runs reached the async callback before `setIsRedirecting(true)` landed, both
@@ -419,6 +482,11 @@ is why `POST /sign-out` is not in the route allowlist (see [Disabled Endpoints](
 ## Route Protection (`src/proxy.ts`)
 
 Uses `getSessionCookie()` from `better-auth/cookies` for fast cookie-only checks (no JWT decoding or API calls).
+
+`proxy()` also builds the per-request Content-Security-Policy nonce and attaches
+the CSP to **every** response it produces, redirects included — see
+[Security Headers](security-headers.md). That is why `/signin` must stay a server
+component: a prerendered page has no request, so no nonce.
 
 ### Public Paths (no auth required)
 
@@ -558,10 +626,14 @@ function MyComponent() {
 
 `UserProvider` in `src/contexts/user-context.tsx` loads the full MP user profile client-side:
 
-1. Reads `session.user.userGuid` from `authClient.useSession()`
-2. Calls `getCurrentUserProfile(userGuid)` server action
+1. Waits for a session from `authClient.useSession()`
+2. Calls the `getCurrentUserProfile()` server action — **it takes no parameters**.
+   The `User_GUID` is read from the session server-side, never accepted from the
+   caller: the profile discloses the user's roles and user groups, and GUIDs are not
+   usefully secret (they appear in the client session and in `/contactlookup` URLs)
 3. `UserService.getUserProfile()` queries `dp_Users WHERE User_GUID = '{userGuid}'`
-4. Returns `MPUserProfile` (First_Name, Last_Name, Email, Image_GUID, etc.)
+4. Returns `MPUserProfile` (First_Name, Last_Name, Email_Address, Image_GUID, `roles`,
+   `userGroups`, plus the server-computed `canAccessContactFeatures` UX flag)
 5. Profile available via `useUser()` hook in any client component
 
 ## Authorization (distinct from authentication)
@@ -762,7 +834,7 @@ out and back in — there is no cached decision to expire.
 `window.location.href` for a visitor who already had a session, so
 `/signin?callbackUrl=https://evil.example` bounced the user off-site from a URL that
 looks like this app's own login page. `sanitizeCallbackUrl` in
-`src/app/signin/page.tsx` now reduces it to a same-origin relative path — it must start
+`src/components/sign-in/sign-in.tsx` now reduces it to a same-origin relative path — it must start
 with `/` and must not start with `//` or `/\` (browsers normalize the latter to the
 former) — and the sanitized value feeds **both** sinks: the `location.href` assignment
 and the `callbackURL` handed to `signIn.social` (which better-auth also validates
@@ -778,6 +850,12 @@ server-side; defence in depth).
 | **F11** (Low) — `getMpTimezone` had no check at all | 2026-09-12 | Authenticated-session check (its only consumer is the role-gated contact page) |
 | **F5** (Medium) — member PII and pastoral notes written to server logs at info level | 2026-09-12 | Removed all `console.log`/`.debug`/`.info` from non-script `src/`; error logs now carry identifiers/shape only (no request bodies, result sets, `Notes`, or `$filter`/full URLs); see § Logging policy above |
 | **F4** (Medium) — contact-log writes accepted `Made_By`/`Contact_ID` from the caller | 2026-09-12 | `ContactLogService` stamps `Made_By` from the gate and strips both keys via the schema `.omit()`; `Contact_ID` is never sent on update; see § Attribution is server-authoritative above |
+| **F2** (High) — a shared MP email could merge two people onto one better-auth user | 2026-09-12 | `accountLinking.enabled: false`, a synthetic `email` derived from `sub`, the real address moved to `mpEmail`, and `emailVerified` from the provider's own claim; see § Email is never a key and § Account linking |
+| **F7** (Low) — OAuth failures landed on better-auth's built-in error page | 2026-09-12 | `onAPIError.errorURL: "/auth-error"` plus the route allowlist, which no longer exposes `GET /error`; see § OAuth Flow |
+| **F9** (Medium) — no HTTP security headers, no CSP | 2026-09-12 | Static headers in `next.config.ts`, nonce-based CSP built per request in `src/proxy.ts`; see [Security Headers](security-headers.md) |
+
+**Still open:** **F8** — PKCE is explicitly `false` even though MP advertises `S256`.
+See the `pkce` row in [genericOAuth Configuration](#genericoauth-configuration).
 
 ## Environment Variables
 
@@ -786,8 +864,10 @@ server-side; defence in depth).
 | `MINISTRY_PLATFORM_BASE_URL` | Yes | MP server URL (OAuth discovery, API) |
 | `BETTER_AUTH_URL` | Yes* | App URL for callbacks. Fallback: `NEXTAUTH_URL` |
 | `BETTER_AUTH_SECRET` | Yes* | Session signing secret. Fallback: `NEXTAUTH_SECRET` |
-| `OIDC_CLIENT_ID` | Yes | OAuth client ID registered in MP |
-| `OIDC_CLIENT_SECRET` | Yes | OAuth client secret |
+| `OIDC_CLIENT_ID` | Yes | OAuth client ID registered in MP (user login) |
+| `OIDC_CLIENT_SECRET` | Yes | OAuth client secret (user login) |
+| `MINISTRY_PLATFORM_CLIENT_ID` | Yes | Client-credentials service account used for **all** MP data access. Auth depends on it too: `customSession` resolves `User_ID` and `AuthorizationService` reads `dp_User_Roles` through it. May be the same client as `OIDC_CLIENT_ID` |
+| `MINISTRY_PLATFORM_CLIENT_SECRET` | Yes | Secret for the above |
 | `MP_SECURITY_ROLES` | No | Comma-separated MP role names permitted to use the gated contact features (reads **and** writes). Unset or blank = any security role. See [Authorization](#authorization-distinct-from-authentication). |
 | `MP_WRITE_SECURITY_ROLES` | No | **Deprecated** — the write-only predecessor of `MP_SECURITY_ROLES`, read only when that is unset or blank, and now governing reads too. |
 
@@ -837,8 +917,10 @@ the `better-auth` version, do this before merging:
 5. **If sign-in fails at the callback**, check the dev-server log for the
    provider-level errors better-auth emits at init and callback time:
    - `id_token failed verification against the discovery JWKS or expected nonce`
-     → MP isn't echoing the `nonce`, or JWKS/audience changed. Escape hatch:
-     `disableIdTokenNonceBinding: true` (costs `id_token` replay protection).
+     → if `disableIdTokenNonceBinding: true` has gone missing from the config,
+     put it back: MP never sends the `nonce` claim (see
+     [`nonce` binding is off](#nonce-binding-is-off-and-must-stay-off)). With it
+     set, this line means JWKS/issuer/audience changed instead.
    - `discovery returned no valid data` → MP discovery is unreachable. Since
      1.7.3 this no longer throws out of `betterAuth()` (#10978), so the app still
      boots — but sign-in stays broken until discovery returns, because the

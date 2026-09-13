@@ -6,19 +6,26 @@ instead of re-deriving them. Every entry needs a date and a re-check trigger.
 Last audit: **2026-08-27** — report at `.claude/reports/deps-audit-2026-08-27.md`
 (prior: `deps-audit-2026-08-21-run2.md`, `deps-audit-2026-08-21.md`).
 
+Advisory state re-verified **2026-09-12** (release docs pass — read-only, no
+upgrades applied): `npm audit` reports **0 vulnerabilities across 720 packages**
+(prod 206, dev 424, optional 147) and `npm run deps:verify` reports no lockfile
+drift. Installed at that check: `next@16.3.5`, `better-auth@1.7.4`,
+`typescript@6.0.3`, `eslint@9.39.5`, `@types/node@24.13.4`, Node 24.18.0,
+npm 11.16.0.
+
 ## Accepted advisories (triaged as not exploitable)
 
 | Package | Advisory | Reason not exploitable | Verified | Re-check when |
 |---|---|---|---|---|
-| `better-auth` | 2026 CVE cluster: `CVE-2026-53513` (SSRF, CVSS 9.6, `@better-auth/sso`), `CVE-2026-53516` (OAuth auto-link ATO), `CVE-2026-45337` (`deviceAuthorization`), `CVE-2026-67336` (insecure crypto defaults in `oidcProvider`/`mcp`) | Two independent reasons: (a) all fixed in `1.6.11`+, installed is `1.7.1`; (b) the vulnerable plugins are not loaded — `src/lib/auth.ts` registers exactly `genericOAuth`, `customSession`, `nextCookies`. Repo-wide grep for `oidcProvider`, `mcp(`, `ssoPlugin`, `deviceAuthorization`, `apiKey(` matches nothing outside comments. **Re-verified run 2 (2026-08-21):** plugin list unchanged (`genericOAuth` L77, `customSession` L164, `nextCookies` L186); grep still returns no matches; OSV independently returns 0 vulns for `better-auth@1.7.1`. | 2026-08-21 (run 2) | Any change to the plugin list in `src/lib/auth.ts` |
-| `next` | [GHSA-2xp9-vwfh-vxw4](https://github.com/vercel/next.js/security/advisories/GHSA-2xp9-vwfh-vxw4) — **critical** unauthenticated RCE optimizing an attacker-controlled AVIF (`libheif` via `sharp`) | **Patched** (`16.3.3`) *and* unreachable, three independent ways: (a) all three `<Image>` call sites pass `unoptimized` — `contact-lookup-results.tsx:95`, `contact-lookup-details.tsx:78`, `layout/header.tsx:60`; (b) `next.config.ts` declares no `images.remotePatterns`/`domains`, so `/_next/image` rejects every remote URL — an attacker cannot supply a hostile AVIF; (c) the only local file the optimizer can reach is `public/assets/icons/favicon.ico`, repo-committed. Note `/_next/image` is unauthenticated by design (`src/proxy.ts:32` excludes it), so (a)–(c) are the entire defense. | 2026-08-27 | **Either** `images.remotePatterns`/`domains` is added to `next.config.ts`, **or** any `<Image>` drops `unoptimized` |
+| `better-auth` | 2026 CVE cluster: `CVE-2026-53513` (SSRF, CVSS 9.6, `@better-auth/sso`), `CVE-2026-53516` (OAuth auto-link ATO), `CVE-2026-45337` (`deviceAuthorization`), `CVE-2026-67336` (insecure crypto defaults in `oidcProvider`/`mcp`) | Two independent reasons: (a) all fixed in `1.6.11`+, installed is `1.7.4`; (b) the vulnerable plugins are not loaded — `src/lib/auth.ts` registers exactly `genericOAuth`, `customSession`, `nextCookies`. Repo-wide grep for `oidcProvider`, `mcp(`, `ssoPlugin`, `deviceAuthorization`, `apiKey(` matches nothing outside comments. **Re-verified run 2 (2026-08-21):** plugin list unchanged; grep still returns no matches; OSV independently returns 0 vulns for `better-auth@1.7.1`. **Re-verified 2026-09-12:** upgraded to `1.7.4` (`e02eec3`), plugin list still exactly those three. | 2026-09-12 | Any change to the plugin list in `src/lib/auth.ts` |
+| `next` | [GHSA-2xp9-vwfh-vxw4](https://github.com/vercel/next.js/security/advisories/GHSA-2xp9-vwfh-vxw4) — **critical** unauthenticated RCE optimizing an attacker-controlled AVIF (`libheif` via `sharp`) | **Patched** (`16.3.3`; installed is now `16.3.5`) *and* unreachable, three independent ways: (a) all three `<Image>` call sites pass `unoptimized` — `contact-lookup-results.tsx`, `contact-lookup-details.tsx`, `layout/header.tsx`; (b) `next.config.ts` declares no `images.remotePatterns`/`domains`, so `/_next/image` rejects every remote URL — an attacker cannot supply a hostile AVIF; (c) the only local file the optimizer can reach is `public/assets/icons/favicon.ico`, repo-committed. Note `/_next/image` is unauthenticated by design (the matcher at the bottom of `src/proxy.ts` excludes it), so (a)–(c) are the entire defense. **Re-verified 2026-09-12:** still three `unoptimized` call sites, still no `images` key in `next.config.ts`. | 2026-09-12 | **Either** `images.remotePatterns`/`domains` is added to `next.config.ts`, **or** any `<Image>` drops `unoptimized` |
 | `next` | [CVE-2026-75604](https://www.cve.org/CVERecord?id=CVE-2026-75604) / [GHSA-p293-qw3h-jr36](https://github.com/vercel/next.js/security/advisories/GHSA-p293-qw3h-jr36) — **critical** unauthenticated RCE on Windows-hosted servers | **Patched** (`16.3.3`). Needed **both** preconditions; only one held. Windows filesystem — **met** (dev on Windows 11). Both Pages Router *and* App Router — **not met**: App Router only (`src/app/`), no source `pages/`, no `getServerSideProps`/`getStaticProps`/`next/router` in `src/`. (`./.next/server/pages` is a build artifact for internal error pages, **not** Pages Router adoption — do not misread it.) Narrower margin than the AVIF issue: one `pages/` route would have made it live. | 2026-08-27 | A `pages/` directory is introduced |
 
 ### Cleared entries
 
 | Package | Advisory | Cleared because | Date |
 |---|---|---|---|
-| `postcss` (bundled in `next`) | 2 moderate findings under `node_modules/next/...` | Resolved upstream in `next@16.3.1`. `npm audit` now reports 0 findings across 583 packages. | 2026-08-21 |
+| `postcss` (bundled in `next`) | 2 moderate findings under `node_modules/next/...` (GHSA-qx2v-qp2m-jg93, against the `8.4.31` Next used to bundle) | Resolved upstream in `next@16.3.1`. `npm audit` now reports 0 findings across 583 packages. **Still clear 2026-09-12:** `next@16.3.5` bundles `postcss@8.5.23`, top-level `postcss` resolves `8.5.28`, `npm audit` reports 0 across 720 packages. | 2026-08-21 (re-checked 2026-09-12) |
 
 > The `npm audit fix --force` ban is permanent and independent of the cleared entry above:
 > `--force` still "fixes" bundled-dependency findings by downgrading `next` to 9.3.3.
@@ -27,8 +34,8 @@ Last audit: **2026-08-27** — report at `.claude/reports/deps-audit-2026-08-27.
 
 | Package | Target | Blocker | Verified | Re-check when |
 |---|---|---|---|---|
-| `typescript` | 7.x | **Verified by attempt 2026-08-21 (TS 7.0.2).** Lint only — `build` and `tests` both pass on TS 7. `eslint .` dies before linting anything: `Error: typescript-eslint does not support TS 7.0.` — an explicit runtime guard in `typescript-eslint/dist/index.js:52`, not merely a peer-range mismatch. Root cause: **TypeScript 7.0 ships no compiler API at all**, and typescript-eslint needs one. Both `latest` (8.67.0) and `canary` (8.67.1-alpha.24) still declare `typescript: >=4.8.4 <6.1.0`; there is no typescript-eslint 9.x line. Upstream is explicitly targeting **TS >= 7.1**, which is where the new API lands. **Re-confirmed run 2 (2026-08-21):** `latest` 8.67.0, `canary` 8.67.1-alpha.24 — both still `typescript: >=4.8.4 <6.1.0`, no 9.x line. **Re-confirmed 2026-08-27:** `latest` moved to **8.68.0** and `canary` to `8.68.1-alpha.5`; the `typescript` peer is *unchanged* at `>=4.8.4 <6.1.0` and there is still **no 9.x line**. Upstream shipped a minor without touching the TS cap — movement on the package, none on this blocker. | 2026-08-27 | **TypeScript 7.1 ships** (targeted Autumn 2026) — that is the real signal, not a typescript-eslint issue. [typescript-eslint#12518](https://github.com/typescript-eslint/typescript-eslint/issues/12518) is the current tracking issue and is **closed as *not planned***: TS 7.0 ships no compiler API, so the fix is TypeScript's, not theirs. Watch the TS 7.1 release; `7.1.0-dev.*` builds publish daily. **Decision 2026-08-27: wait** — oxlint was evaluated as an alternative path and declined (see the note under Blocked majors). |
-| `eslint` | 10.x | **Verified by attempt (run 1), re-confirmed against upstream metadata (run 2).** The three plugins `eslint-config-next` pulls in cap `eslint` at `^9` — and as of run 2 **all three are at their latest published version**, so this is an upstream gap, not a stale pin: `eslint-plugin-react@7.37.5` (`… ‖ ^9.7`), `eslint-plugin-import@2.32.0` (`… ‖ ^9`), `eslint-plugin-jsx-a11y@6.10.2` (`… ‖ ^9`). `eslint-config-next@16.3.2` depends on `^7.37.0` / `^2.32.0` / `^6.10.0` respectively — i.e. it already allows the newest. Installing v10 → `ERESOLVE overriding peer dependency` ×3 and `npm error invalid: eslint@10.8.1`; `eslint .` then dies with `TypeError: Error while loading rule 'react/display-name': contextOrFilename.getFilename is not a function` (`eslint-plugin-react` still calls the `context.getFilename()` API v10 removed). Zero files lintable. Reverted. **Re-confirmed 2026-08-27:** all three plugins remain at the identical latest versions (`7.37.5` / `2.32.0` / `6.10.2`) with identical `^9` caps, and `eslint-config-next@16.3.3` already permits the newest of each — an upstream gap, not a stale pin. **Partial movement:** `typescript-eslint@8.68.0` now declares `eslint: ^8.57.0 \|\| ^9.0.0 \|\| ^10.0.0`, so it is **no longer part of the blockage**; the three plugins are now the sole remaining constraint. | 2026-08-27 | Any of `eslint-plugin-react` / `-import` / `-jsx-a11y` ships ESLint 10 support |
+| `typescript` | 7.x | **Verified by attempt 2026-08-21 (TS 7.0.2).** Lint only — `build` and `tests` both pass on TS 7. `eslint .` dies before linting anything: `Error: typescript-eslint does not support TS 7.0.` — an explicit runtime guard in `typescript-eslint/dist/index.js:52`, not merely a peer-range mismatch. Root cause: **TypeScript 7.0 ships no compiler API at all**, and typescript-eslint needs one. Both `latest` (8.67.0) and `canary` (8.67.1-alpha.24) still declare `typescript: >=4.8.4 <6.1.0`; there is no typescript-eslint 9.x line. Upstream is explicitly targeting **TS >= 7.1**, which is where the new API lands. **Re-confirmed run 2 (2026-08-21):** `latest` 8.67.0, `canary` 8.67.1-alpha.24 — both still `typescript: >=4.8.4 <6.1.0`, no 9.x line. **Re-confirmed 2026-08-27:** `latest` moved to **8.68.0** and `canary` to `8.68.1-alpha.5`; the `typescript` peer is *unchanged* at `>=4.8.4 <6.1.0` and there is still **no 9.x line**. Upstream shipped a minor without touching the TS cap — movement on the package, none on this blocker. **Re-confirmed 2026-09-12:** `typescript-eslint@latest` is now **8.70.0**, peer still `typescript: >=4.8.4 <6.1.0`, still no 9.x line. TypeScript dist-tags that day: `latest` **7.0.2**, `next` **7.1.0-dev.20260912.1** — 7.1 has not shipped, so the blocker stands; installed here remains `typescript@6.0.3`. | 2026-09-12 | **TypeScript 7.1 ships** (targeted Autumn 2026) — that is the real signal, not a typescript-eslint issue. [typescript-eslint#12518](https://github.com/typescript-eslint/typescript-eslint/issues/12518) is the current tracking issue and is **closed as *not planned***: TS 7.0 ships no compiler API, so the fix is TypeScript's, not theirs. Watch the TS 7.1 release; `7.1.0-dev.*` builds publish daily. **Decision 2026-08-27: wait** — oxlint was evaluated as an alternative path and declined (see the note under Blocked majors). |
+| `eslint` | 10.x | **Verified by attempt (run 1), re-confirmed against upstream metadata (run 2).** The three plugins `eslint-config-next` pulls in cap `eslint` at `^9` — and as of run 2 **all three are at their latest published version**, so this is an upstream gap, not a stale pin: `eslint-plugin-react@7.37.5` (`… ‖ ^9.7`), `eslint-plugin-import@2.32.0` (`… ‖ ^9`), `eslint-plugin-jsx-a11y@6.10.2` (`… ‖ ^9`). `eslint-config-next@16.3.2` depends on `^7.37.0` / `^2.32.0` / `^6.10.0` respectively — i.e. it already allows the newest. Installing v10 → `ERESOLVE overriding peer dependency` ×3 and `npm error invalid: eslint@10.8.1`; `eslint .` then dies with `TypeError: Error while loading rule 'react/display-name': contextOrFilename.getFilename is not a function` (`eslint-plugin-react` still calls the `context.getFilename()` API v10 removed). Zero files lintable. Reverted. **Re-confirmed 2026-08-27:** all three plugins remain at the identical latest versions (`7.37.5` / `2.32.0` / `6.10.2`) with identical `^9` caps, and `eslint-config-next@16.3.3` already permits the newest of each — an upstream gap, not a stale pin. **Partial movement:** `typescript-eslint@8.68.0` now declares `eslint: ^8.57.0 \|\| ^9.0.0 \|\| ^10.0.0`, so it is **no longer part of the blockage**; the three plugins are now the sole remaining constraint. **Re-confirmed 2026-09-12:** all three plugins still at `7.37.5` / `2.32.0` / `6.10.2` with the same `^9` caps; `eslint-config-next` has moved to `16.3.5` and still permits the newest of each; `typescript-eslint@8.70.0` still declares `eslint: ^8.57.0 \|\| ^9.0.0 \|\| ^10.0.0`. | 2026-09-12 | Any of `eslint-plugin-react` / `-import` / `-jsx-a11y` ships ESLint 10 support |
 | `@types/node` | 26.x | The `@types/node` major tracks the Node major; local runtime is Node **24.18.0**. Resolved this audit by realigning **down** to `^24.13.3` (see Held). Going to 26 would put types two majors ahead of the runtime. | 2026-08-21 | Local/CI/production Node moves to 26 |
 
 > **Do not check only the top-level peer of `eslint-config-next`.** Its declared peer is
@@ -84,7 +91,8 @@ Last audit: **2026-08-27** — report at `.claude/reports/deps-audit-2026-08-27.
 >   that it would retire the deprecated `eslint@9` hold below — unblocking TS 7 is a side effect.
 
 > **`@types/node` version numbers do not track Node patch versions.** There is no `@types/node@24.18.0`
-> (the highest 24.x is `24.13.3`). Writing an unsatisfiable range does not fail fast — it sends the npm
+> (the highest 24.x is `24.13.4` as of 2026-09-12, and that is what `^24.13.3` resolves to). Writing an
+> unsatisfiable range does not fail fast — it sends the npm
 > resolver into pathological backtracking (~870 CPU-seconds with no output before being killed).
 > Confirm the version exists with `npm view "@types/node@^24" version` before editing the range.
 
@@ -120,7 +128,7 @@ Last audit: **2026-08-27** — report at `.claude/reports/deps-audit-2026-08-27.
 | Package | Pinned at | Reason | Decided |
 |---|---|---|---|
 | `@types/node` | `^24.13.3` | Deliberately held **one major below `latest`** so the type surface matches the Node 24.18.0 runtime. Bumping to 25 or 26 would let `tsc` accept APIs the runtime does not have. Move this only together with the actual runtime. | 2026-08-21 |
-| `eslint` | `^9.39.2` (resolves 9.39.5) | This version is **deprecated upstream** ("no longer supported"), and is held only because ESLint 10 is hard-blocked by the plugins `eslint-config-next` vendors. Not a preference — an unavoidable hold. Revisit as soon as `eslint-config-next` updates its bundled plugins. | 2026-08-21 |
+| `eslint` | `^9.39.2` (resolves 9.39.5) | This version is **deprecated upstream** ("no longer supported"), and is held only because ESLint 10 is hard-blocked by the plugins `eslint-config-next` vendors. Not a preference — an unavoidable hold. Revisit as soon as `eslint-config-next` updates its bundled plugins. Re-verified 2026-09-12: `npm view eslint@9.39.5 deprecated` still returns "This version is no longer supported", and upstream `latest` is now `10.10.0`. | 2026-08-21 (re-verified 2026-09-12) |
 
 ## Removed dependencies
 
@@ -149,8 +157,8 @@ It happened twice, and both times reached `main` and were found a merge later:
 
 | Date | Trigger | Damage |
 |---|---|---|
-| 2026-05-17 | `npm dedupe` on Windows | `@emnapi/*` subtree under `@tailwindcss/oxide-wasm32-wasi` pruned; fixed by hand |
-| 2026-08-21 | `64f18f0` "Package Update Cleanup" | `ajv` hoisted to top level; `main` red for ~45 min; fixed in PR #72 |
+| 2026-05-17 | `ecaa009` "bump tsx … @vitejs/plugin-react" (a Windows dedupe as a side effect) | `@emnapi/*` subtree under `@tailwindcss/oxide-wasm32-wasi` pruned; fixed by hand in `d623e29` |
+| 2026-08-21 | `64f18f0` "Package Update Cleanup" | `ajv` hoisted to top level (and bundled `@emnapi` entries pruned again); `main` red for ~45 min; fixed in `9de8875` (PR #72) |
 
 ### The rule
 
@@ -182,11 +190,16 @@ npm run deps:verify     # confirm clean
 This is the third time this exact drift has occurred, and the first time it was caught before
 reaching `main` — by the guard, from Windows, as designed.
 
-`deps:relock` is `npm install --package-lock-only --os=linux --cpu=x64`. Verified
-2026-08-21: it restores every missing nested/bundled entry, prunes nothing, and does not
-narrow the lockfile to one platform — platform entry counts were byte-identical before and
-after (win32 76, darwin 75, linux-x64 46, android 40). It is idempotent, and
-`--package-lock-only` never touches `node_modules`, so it is safe to run mid-session.
+`deps:relock` is `node scripts/check-lockfile.mjs --fix` — the same guard as `deps:verify`,
+which relocks a throwaway copy with `npm install --package-lock-only --os=linux --cpu=x64
+--ignore-scripts --no-audit --no-fund` and writes the canonical result back over
+`package-lock.json`, preserving the repo's CRLF line endings. It rewrites only when the tree
+shape actually drifted; a lockfile that differs from canonical in npm metadata alone is left
+untouched. Verified 2026-08-21: it restores every missing nested/bundled entry, prunes
+nothing, and does not narrow the lockfile to one platform — platform entry counts were
+byte-identical before and after (win32 76, darwin 75, linux-x64 46, android 40). It is
+idempotent, and `--package-lock-only` never touches `node_modules`, so it is safe to run
+mid-session.
 
 **Never** regenerate with a bare `npm install` or `npm dedupe` on Windows. Measured against
 the fixed lockfile: a plain `npm install --package-lock-only` is harmless (2 metadata lines),
@@ -227,8 +240,10 @@ reports `ajv: 6.15.0 -> 8.20.0` and a missing `fast-uri`, which is what `npm ci`
 - **pre-commit** — `.githooks/pre-commit`, only when `package-lock.json` is staged.
   Auto-installed by the `prepare` script (`git config core.hooksPath .githooks`), so a fresh
   clone gets it on first `npm install`. Bypass with `git commit --no-verify`.
-- **CI** — the `lockfile` job in `.github/workflows/test.yml`, on every push and PR. This is
-  the authoritative check; it runs on Linux and cannot be skipped.
+- **CI** — the `lockfile` job in `.github/workflows/test.yml`, on every push to `main` and
+  every PR targeting `main` (the workflow's only triggers — a push to a feature branch with
+  no open PR runs nothing). This is the authoritative check; it runs on Linux, on Node 22,
+  ahead of the `test` job, and cannot be skipped.
 
 Offline behavior: the check needs the registry. Locally it warns and passes when npm is
 unreachable (so an offline commit is not blocked); in CI (`process.env.CI`) it fails instead.

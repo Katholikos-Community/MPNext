@@ -1,8 +1,38 @@
 # MP Query Syntax Reference
 
-This document captures the query syntax accepted by the Ministry Platform REST API's `/tables/{table}/get` endpoint — the surface that `MPHelper.getTableRecords` and the `mp_query` MCP tool both call. Use this when writing or reviewing `select` / `filter` / `orderBy` / `groupBy` / `having` strings.
+This document captures the query syntax accepted by the Ministry Platform REST API's table endpoint —
+`GET /tables/{table}` with the query parameters below — which is what `MPHelper.getTableRecords` calls
+(`src/lib/providers/ministry-platform/services/table.service.ts`). Use this when writing or reviewing
+`select` / `filter` / `orderBy` / `groupBy` / `having` strings.
 
 The syntax is **SQL-style**, not OData. Most "weird" error messages from MP boil down to one of the rules below.
+
+## Parameter names
+
+`MPHelper.getTableRecords` takes a single options object with camelCase keys and maps them onto the
+wire parameters. Both spellings appear in this document; the mapping is one-to-one:
+
+| `getTableRecords` option | Wire parameter |
+|---|---|
+| `select` | `$select` |
+| `filter` | `$filter` |
+| `orderBy` | `$orderby` |
+| `groupBy` | `$groupby` |
+| `having` | `$having` |
+| `top` | `$top` |
+| `skip` | `$skip` |
+| `distinct` | `$distinct` |
+| `userId` | `$userId` |
+| `globalFilterId` | `$globalFilterId` |
+
+`$userId` supplies the MP user context for security and auditing; omitting it runs the read as the
+application's service account, which is what every service in `src/services/` does today.
+`$globalFilterId` applies a domain global filter by ID. Neither is a substitute for
+`AuthorizationService.requireSecurityRole` — see `.claude/references/auth.md` § Authorization.
+
+`HttpClient.buildUrl` runs every parameter **value** through `encodeURIComponent`, so write filters as
+plain SQL — do not percent-encode spaces, quotes or `%` wildcards yourself, or they will be
+double-encoded.
 
 ## Filters (`$filter`) — SQL-style WHERE clauses
 
@@ -119,6 +149,11 @@ Joined columns come back with the leaf column name (e.g. `Meeting_Day`). When tw
 
 ## Worked Example — "Groups led by a contact"
 
+Illustrative, not lifted from this repo — there is no group feature here today. It is kept because it is
+the smallest case that exercises both `_TABLE` rules at once. The option keys are the real
+`MPHelper.getTableRecords` surface. For live in-repo examples of `_TABLE` traversal see
+`src/services/userService.ts` and `src/services/authorizationService.ts`.
+
 Two parallel queries on `MPHelper.getTableRecords` covering (a) primary contact of the group, and (b) leader-role participation:
 
 ```typescript
@@ -174,7 +209,7 @@ Notice in Query B that bare `End_Date` is qualified as `Group_Participants.End_D
 |---|---|---|
 | `Ambiguous column name 'X'` | `_TABLE` used somewhere; bare `X` exists on both base and joined tables | Qualify every base-table column with `<Table>.X` in `$select` and any clause that references it |
 | `Invalid column name 'X_ID_TABLE'` | Multi-hop traversal written with dots between hops | Concatenate hops with `_TABLE_` instead: `A_ID_TABLE_B_ID_TABLE.Column` |
-| `Invalid column name 'X'` (no `_TABLE` suffix) | Column name mis-cased or table mis-chosen | Re-verify via `mp_lookup` — MP names are case-sensitive |
+| `Invalid column name 'X'` (no `_TABLE` suffix) | Column name mis-cased or table mis-chosen | Re-verify against `.claude/references/ministryplatform.schema.md` or the generated model in `src/lib/providers/ministry-platform/models/` |
 | Subquery rejected | Used `SELECT` inside `$filter` | Rewrite using `_TABLE` traversal; if not expressible, run two queries and merge in code |
 | `BETWEEN` rejected | Used SQL BETWEEN in `$filter` | Rewrite as two comparisons (`>= 'start' AND < 'end'`) |
 
@@ -183,12 +218,29 @@ Notice in Query B that bare `End_Date` is qualified as `Group_Participants.End_D
 `$filter` becomes a SQL `WHERE` clause, so **every** value interpolated into a filter string must pass
 through a sanitizer from `src/lib/providers/ministry-platform/utils/filter-sanitize.ts` first:
 
-| Value | Helper | Pattern |
+| Value | Helper | Pattern (as written in a TS template literal) |
 |---|---|---|
-| String (equality) | `sanitizeFilterValue` | `Column = '${sanitizeFilterValue(v)}'` |
-| String (LIKE) | `sanitizeLikeValue` | `Column LIKE '%${sanitizeLikeValue(v)}%' ESCAPE ''` |
-| GUID | `sanitizeGuid` | `Column = '${sanitizeGuid(v)}'` — throws on non-GUID |
-| Numeric ID | `sanitizeNumericId` | `Column = ${sanitizeNumericId(v, 'Contact ID')}` — throws on anything but a positive integer or digits-only string |
+| String (equality) | `sanitizeFilterValue(value: string): string` | `Column = '${sanitizeFilterValue(v)}'` |
+| String (LIKE) | `sanitizeLikeValue(value: string): string` | `Column LIKE '%${sanitizeLikeValue(v)}%' ESCAPE '\\'` |
+| GUID | `sanitizeGuid(guid: string): string` | `Column = '${sanitizeGuid(v)}'` — throws `Invalid GUID format` on non-GUID |
+| Numeric ID | `sanitizeNumericId(value: unknown, field?: string): number` | `Column = ${sanitizeNumericId(v, 'Contact ID')}` — unquoted; throws `Invalid <field>` on anything else |
+
+What each one actually enforces:
+
+- **`sanitizeFilterValue`** doubles single quotes (`O'Brien` → `O''Brien`) and nothing else. It only makes
+  a value safe *inside* a single-quoted literal — it does not validate, so never use it unquoted.
+- **`sanitizeLikeValue`** escapes `\`, then `%` and `_` (the SQL LIKE wildcards), then doubles single
+  quotes. The escape character is a backslash, so the caller **must** append `ESCAPE '\'` or the escapes
+  are ignored and the wildcards stay live. In TypeScript that is written `ESCAPE '\\'`; see
+  `ContactService.contactSearch`, the one place in the app that builds a LIKE filter.
+- **`sanitizeGuid`** validates the canonical 8-4-4-4-12 hex shape, case-insensitively, for any UUID
+  variant (MP GUIDs are not all v4). It returns the value unchanged, so it doubles as a shape check —
+  `src/lib/auth.ts` uses it that way on the OAuth `sub` claim.
+- **`sanitizeNumericId`** accepts a `number`, or a **digits-only** string, and returns a `number`. It
+  rejects whitespace padding, signs, decimals, hex, exponent notation, the empty string, `NaN`,
+  `Infinity`, zero, negatives, objects, arrays, booleans and bigints, and it caps at
+  `Number.isSafeInteger` so a huge value cannot stringify into `1e+21`. The error message names the
+  `field` and never echoes the offending value.
 
 A `number` parameter is not exempt. TypeScript annotations are erased at runtime, and server actions
 compile to POST endpoints whose payload *shape* the caller controls — so a string does arrive where
@@ -203,5 +255,7 @@ input fails before the authorization gate and the network call.
 ## See also
 
 - `src/lib/providers/ministry-platform/helper.ts` — `MPHelper.getTableRecords` signature.
-- `src/services/userService.ts`, `src/services/groupService.ts` — services that use `_TABLE` traversal and table-qualified selects.
+- `src/lib/providers/ministry-platform/services/table.service.ts` — the endpoint and HTTP verb.
+- `src/lib/providers/ministry-platform/utils/filter-sanitize.ts` (+ `.test.ts`) — the four sanitizers and the full rejected-input list.
+- `src/services/userService.ts`, `src/services/authorizationService.ts` — services that use `_TABLE` traversal.
 - `.claude/references/ministryplatform.schema.md` — table / column / FK reference.

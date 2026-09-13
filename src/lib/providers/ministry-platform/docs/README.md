@@ -23,12 +23,12 @@ HttpClient (Low-level HTTP operations)
 ```
 ministry-platform/
 ├── index.ts                    # Main barrel export
-├── client.ts                   # Core MP client
-├── provider.ts                 # Main provider class
+├── client.ts                   # Core MP client (OAuth token lifecycle)
+├── provider.ts                 # Main provider class (singleton)
 ├── helper.ts                   # Public API helper
 ├── auth/                       # Authentication
-│   ├── client-credentials.ts   # OAuth client credentials
-│   ├── types.ts                # Auth-related types
+│   ├── client-credentials.ts   # OAuth client credentials grant
+│   ├── types.ts                # MinistryPlatformProfile (OIDC claims)
 │   └── index.ts                # Barrel export
 ├── services/                   # Service layer
 │   ├── table.service.ts
@@ -36,38 +36,54 @@ ministry-platform/
 │   ├── communication.service.ts
 │   ├── metadata.service.ts
 │   ├── domain.service.ts
-│   └── file.service.ts
-├── models/                     # Data models
-│   ├── congregations.ts
-│   ├── contact-log.ts
-│   └── contact-log-types.ts
+│   ├── file.service.ts
+│   └── index.ts                # Barrel export
+├── models/                     # Generated types + Zod schemas (one pair per MP table)
+│   ├── Contacts.ts
+│   ├── ContactsSchema.ts
+│   ├── ...
+│   └── index.ts                # Auto-generated barrel export
 ├── types/                      # Type definitions
 │   ├── provider.types.ts
-│   └── user-profile.types.ts
+│   ├── user-profile.types.ts
+│   └── index.ts
 ├── utils/                      # Utilities
-│   └── http-client.ts
+│   ├── http-client.ts
+│   ├── filter-sanitize.ts      # $filter injection guards
+│   └── index.ts
+├── scripts/                    # Code generation CLIs
+│   ├── generate-types.ts
+│   ├── generate-storedprocs.ts
+│   └── README.md
 └── docs/                       # Documentation
     └── README.md
 ```
+
+`models/` is generated — never edit it by hand. See [scripts/README.md](../scripts/README.md).
 
 ## Quick Start
 
 ```typescript
 import { MPHelper } from '@/lib/providers/ministry-platform';
+import { Contacts } from '@/lib/providers/ministry-platform/models';
+import { DomainTimezoneService } from '@/services/domainTimezoneService';
 
 const mp = new MPHelper();
 
 // Get contacts
-const contacts = await mp.getTableRecords<Contact>({
+const contacts = await mp.getTableRecords<Contacts>({
   table: 'Contacts',
   filter: 'Contact_Status_ID=1',
   select: 'Contact_ID,Display_Name,Email_Address'
 });
 
-// Create contact log
+// Create contact log. MP stores wall-clock values in the domain's time zone,
+// so datetimes must be converted at the boundary — never `new Date().toISOString()`.
+const tz = DomainTimezoneService.getInstance();
+
 await mp.createTableRecords('Contact_Log', [{
   Contact_ID: 12345,
-  Contact_Date: new Date().toISOString(),
+  Contact_Date: await tz.toMpSqlDatetime(new Date()),
   Made_By: 1,
   Notes: 'Follow-up call completed'
 }]);
@@ -81,79 +97,221 @@ MINISTRY_PLATFORM_CLIENT_ID=your_client_id
 MINISTRY_PLATFORM_CLIENT_SECRET=your_client_secret
 ```
 
+`MinistryPlatformClient` reads the base URL; `getClientCredentialsToken()` reads the
+client ID and secret and requests a token from `{base}/oauth/connect/token`. Tokens are
+cached on the client and refreshed 5 minutes ahead of the reported expiry.
+
 ## Features
 
 - ✅ Full TypeScript support with comprehensive types
 - ✅ Automatic OAuth2 token management
 - ✅ Service-oriented architecture
-- ✅ Zod schema validation
-- ✅ Better Auth integration
+- ✅ Optional Zod schema validation on create/update
 - ✅ File upload/download support
-- ✅ Comprehensive error handling
+- ✅ `$filter` sanitization helpers
 - ✅ Clean, standards-compliant code organization
-- ✅ Type generation CLI from MP schema
+- ✅ Type and stored-procedure generation CLIs from MP schema
 
 ## API
+
+Every method below is on `MPHelper`, a facade over the provider singleton.
 
 ### Table Operations
 
 ```typescript
-mp.getTableRecords<T>(params)
-mp.createTableRecords<T>(table, records, params?)
-mp.updateTableRecords<T>(table, records, params?)
-mp.deleteTableRecords<T>(table, ids, params?)
+mp.getTableRecords<T>(params: {
+  table: string;
+  select?: string;
+  filter?: string;
+  orderBy?: string;
+  groupBy?: string;
+  having?: string;
+  top?: number;
+  skip?: number;
+  distinct?: boolean;
+  userId?: number;
+  globalFilterId?: number;
+}): Promise<T[]>
+
+mp.createTableRecords<T>(
+  table: string,
+  records: T[],
+  params?: { $select?: string; $userId?: number; schema?: ZodObject }
+): Promise<T[]>
+
+mp.updateTableRecords<T>(
+  table: string,
+  records: T[],
+  params?: {
+    $select?: string;
+    $userId?: number;
+    $allowCreate?: boolean;
+    schema?: ZodObject;
+    partial?: boolean;
+  }
+): Promise<T[]>
+
+mp.deleteTableRecords<T>(
+  table: string,
+  ids: number[],
+  params?: { $select?: string; $userId?: number }
+): Promise<T[]>
 ```
+
+`getTableRecords` takes camelCase keys and maps them onto MP's `$`-prefixed query
+parameters internally. The write methods take the `$`-prefixed keys directly.
 
 ### Procedures
 
 ```typescript
-mp.executeProcedure(procedure, params?)
-mp.executeProcedureWithBody(procedure, parameters)
+mp.getProcedures(search?: string): Promise<ProcedureInfo[]>
+mp.executeProcedure(procedure: string, params?: QueryParams): Promise<unknown[][]>
+mp.executeProcedureWithBody(
+  procedure: string,
+  parameters: Record<string, unknown>
+): Promise<unknown[][]>
 ```
+
+Both execute methods return an array of result sets (`unknown[][]`), not a flat row array.
 
 ### Communications
 
 ```typescript
-mp.createCommunication(communication, attachments?)
-mp.sendMessage(message, attachments?)
+mp.createCommunication(
+  communication: CommunicationInfo,
+  attachments?: File[]
+): Promise<Communication>
+
+mp.sendMessage(message: MessageInfo, attachments?: File[]): Promise<Communication>
 ```
+
+When `attachments` is non-empty the request goes out as multipart form data, otherwise as JSON.
 
 ### Files
 
 ```typescript
-mp.uploadFiles(params)
-mp.getFilesByRecord(params)
-mp.updateFile(params)
-mp.deleteFile(params)
+mp.getFilesByRecord(params: {
+  table: string;
+  recordId: number;
+  defaultOnly?: boolean;
+}): Promise<FileDescription[]>
+
+mp.uploadFiles(params: {
+  table: string;
+  recordId: number;
+  files: File[];
+  uploadParams?: FileUploadParams;
+}): Promise<FileDescription[]>
+
+mp.updateFile(params: {
+  fileId: number;
+  file?: File;
+  updateParams?: FileUpdateParams;
+}): Promise<FileDescription>
+
+mp.deleteFile(params: { fileId: number; userId?: number }): Promise<void>
+
+mp.getFileMetadata(params: { fileId: number }): Promise<FileDescription>
+
+mp.getFileMetadataByUniqueId(params: {
+  uniqueFileId: string;
+}): Promise<FileDescription>
+
+// Does NOT require authentication.
+mp.getFileContentByUniqueId(params: {
+  uniqueFileId: string;
+  thumbnail?: boolean;
+}): Promise<Blob>
 ```
+
+`FileUploadParams` is `{ description?, isDefaultImage?, longestDimension?, userId? }`;
+`FileUpdateParams` adds `fileName?`.
 
 ### Metadata
 
 ```typescript
-mp.getTables(search?)
-mp.refreshMetadata()
-mp.getDomainInfo()
-mp.getGlobalFilters(params?)
+mp.getTables(search?: string): Promise<TableMetadata[]>
+mp.refreshMetadata(): Promise<void>
+```
+
+### Domain
+
+```typescript
+mp.getDomainInfo(): Promise<DomainInfo>
+mp.getGlobalFilters(params?: {
+  $ignorePermissions?: boolean;
+  $userId?: number;
+}): Promise<GlobalFilterItem[]>
+```
+
+## Zod Validation
+
+`createTableRecords` and `updateTableRecords` accept an optional `schema`. When it is
+present each record is parsed before the API call and the parsed result — not the original
+object — is what gets sent. A failure throws `Validation failed for record {index}: ...`,
+naming the offending array index, and the `schema` key is stripped from the params
+forwarded to Ministry Platform.
+
+`partial` applies to `updateTableRecords` only:
+
+- `partial: true` (the default) validates against `schema.partial()`, so a record carrying
+  just a primary key and one changed field passes.
+- `partial: false` validates against the full schema, so every required field must be present.
+
+`createTableRecords` has no `partial` option — creates are always validated against the
+full schema.
+
+```typescript
+import { ContactLogSchema } from '@/lib/providers/ministry-platform/models';
+
+await mp.updateTableRecords('Contact_Log', [{
+  Contact_Log_ID: 67890,
+  Notes: 'Updated notes after follow-up'
+}], {
+  schema: ContactLogSchema,
+  partial: true,
+  $userId: 1
+});
+```
+
+## Filter Sanitization
+
+`$filter` maps to a SQL `WHERE` clause, so every interpolated value must be sanitized.
+`utils/filter-sanitize.ts` exports:
+
+```typescript
+sanitizeFilterValue(value: string): string  // doubles single quotes, for `= '...'`
+sanitizeLikeValue(value: string): string    // also escapes % _ \ ; caller adds ESCAPE
+sanitizeGuid(guid: string): string          // validates 8-4-4-4-12 hex, throws otherwise
+sanitizeNumericId(value: unknown, field?: string): number  // positive safe integer, throws otherwise
+```
+
+These are not re-exported from the `utils` barrel; import them by path:
+
+```typescript
+import { sanitizeNumericId } from '@/lib/providers/ministry-platform/utils/filter-sanitize';
 ```
 
 ## Best Practices
 
 1. Always use TypeScript generics for type safety
-2. Handle errors with try-catch blocks
-3. Cache frequently accessed data
-4. Use Zod schemas for validation
-5. Batch operations when possible
+2. Sanitize every value interpolated into a `filter` string
+3. Convert datetimes with `DomainTimezoneService` at the MP boundary
+4. Use Zod schemas for validation on create and update
+5. Call the provider from a service class in `src/services/`, not from components
+6. Batch operations when possible
 
-## Type Generation
-
-Generate TypeScript interfaces and Zod schemas from your MP schema:
+## Code Generation
 
 ```bash
-# Generate types for all tables
+# Generate types for all tables into ./generated-types
 npm run mp:generate
 
-# Generate to models directory with Zod schemas
+# Regenerate models/ with Zod schemas, cleaning the directory first
 npm run mp:generate:models
+
+# Regenerate the stored procedure reference
+npm run mp:generate:storedprocs
 
 # Or use directly with options
 npx tsx src/lib/providers/ministry-platform/scripts/generate-types.ts --help

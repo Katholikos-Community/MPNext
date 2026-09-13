@@ -1,27 +1,28 @@
 # MPNext — Application & Unit Test Coverage Review
 
-**Date:** 2026-08-21
-**Reviewed commit:** `64f18f0` (branch `main`), plus the coverage work described in §2
-**Scope:** whole application — `src/**` excluding generated MP models
-**Supersedes:** the 2026-08-20 review of `bb2cd19`, whose gap analysis has now been acted on
-**Updated 2026-08-21:** §5.4, §5.5 and §6 (the three contact-log findings) are now fixed — see those
-sections. §5.1 (filter injection via numeric IDs) is now fixed too. The suite is at **575 tests in 32
-files**; `contact-logs.tsx` went from 0% to 87.6% statements.
+**Date:** 2026-09-12
+**Reviewed commit:** `5bc505a` (branch `docs/release-readiness-refresh`)
+**Scope:** whole application — `src/**` excluding generated MP models, codegen scripts and `src/components/ui/`
+**Supersedes:** the 2026-08-21 review of `64f18f0`, whose remaining gaps (§6) have now been closed
+**Measured:** `npm run test:coverage`, Vitest 4.1.11, **1015 tests in 59 files**, ~6.5s
 
 ---
 
 ## 1. Executive summary
 
-Non-UI functional code now sits at **99.47% statement coverage**, up from 71.93%. The suite grew from
-279 tests in 21 files to **419 tests in 30 files**, still running in ~3s, with `tsc --noEmit` and
-`eslint .` both clean.
+The whole application — feature components and app routes included — sits at **99.74% statement
+coverage**. The 2026-08-21 review reported 99.47% over *non-UI* code only, with React components at
+0% and ungated; that split no longer exists, and there is now a single honest number.
 
-| | Before | After |
-|---|---|---|
-| Statements | 71.93% (546/759) | **99.47%** (756/760) |
-| Branches | 70.73% (220/311) | **95.49%** (297/311) |
-| Functions | 72.28% (120/166) | **98.20%** (164/167) |
-| Lines | 72.93% (539/739) | **99.72%** (738/740) |
+| | 2026-08-20 | 2026-08-21 (non-UI) | 2026-09-12 (whole app) |
+|---|---|---|---|
+| Statements | 71.93% (546/759) | 99.47% (756/760) | **99.74%** (1159/1162) |
+| Branches | 70.73% (220/311) | 95.49% (297/311) | **97.21%** (593/610) |
+| Functions | 72.28% (120/166) | 98.20% (164/167) | **99.31%** (291/293) |
+| Lines | 72.93% (539/739) | 99.72% (738/740) | **99.91%** (1126/1127) |
+
+Note the denominator grew from 760 statements to 1162 while the percentage rose: the UI was added to
+the measured set, not excluded from it.
 
 Three things matter more than the headline number:
 
@@ -29,7 +30,7 @@ Three things matter more than the headline number:
 |---|---|
 | **Measurement was inflated ~2.2×.** With no explicit `coverage.include`, every file no test imported dropped out of the denominator. | **Fixed.** `vitest.config.mts` now sets an explicit `include`, plus per-glob `thresholds` that fail the run on regression. |
 | **`testing.md` claimed 95.39% coverage** — not reproducible under any configuration. | **Fixed.** Rewritten against measured numbers, with the new mock patterns documented. |
-| **Coverage was pointed away from the risk.** Two `'use server'` actions have no session check at all, and both sat at 100% line coverage. | **Documented, then fixed.** §5.1 (filter injection), §5.2/§5.3 (missing auth) and §5.4/§5.5 (missing authz, duplicated User_ID lookup) are closed. §5.6 (N+1 lookup) is closed. §5.7 remains open in `.claude/TODO/`. |
+| **Coverage was pointed away from the risk.** Two `'use server'` actions have no session check at all, and both sat at 100% line coverage. | **Documented, then fixed.** Every finding in §5 is closed — §5.1 (filter injection), §5.2/§5.3 (missing auth), §5.4/§5.5 (missing authz, duplicated User_ID lookup), §5.6 (N+1 lookup), §5.7 (token lifetime), §5.8 (tests asserting against a copy of the logic). No test-derived item remains in `.claude/TODO/`. |
 
 The shape of the original problem is worth restating, because the new number does not make it go
 away: **high coverage is not evidence of correctness.** The filter-injection path in §5.1 lived in a
@@ -39,7 +40,7 @@ file at 100% statement coverage for as long as no test passed it a value of the 
 
 ## 2. What changed
 
-### New test files (10)
+### The 2026-08-21 round — new test files (9)
 
 | File | Tests | Statements gained |
 |---|---:|---:|
@@ -52,6 +53,10 @@ file at 100% statement coverage for as long as no test passed it a value of the 
 | `lib/utils.test.ts` | 7 | +1 |
 | `lib/auth-client.test.ts` | 4 | +1 |
 | `components/shared-actions/domain.test.ts` | 3 | +3 |
+
+(The five `*.service.test.ts` files live under
+`src/lib/providers/ministry-platform/services/`; the paths above are shorthand. Test counts are as
+of that round — see `.claude/references/testing.md` for today's per-file inventory.)
 
 The five MP sub-services were the bulk of the gap — 163 of the 213 missing statements. All five share
 the `ensureValidToken` → `getHttpClient` → error-wrap shape that `table.service.ts` already had tested,
@@ -82,62 +87,88 @@ callback and never exposes it, so this was the only way to unit test the logic s
 per-glob `thresholds`. The threshold gate was verified to fail (exit 1) when breached, not just to
 pass when satisfied.
 
+### Since then: 2026-08-21 → 2026-09-12
+
+The suite went from 575 tests in 32 files to **1015 tests in 59 files**. Three bodies of work:
+
+- **The UI was covered and then gated.** Every feature component and app route named as a gap in §6
+  now has a test file, and `vitest.config.mts` gained `src/app/**` and `src/components/**/*.tsx`
+  threshold globs (95/90/95/95) plus a **global** gate (98/95/97/98) that catches a newly added,
+  entirely untested file — which no per-glob gate can, since a new file is diluted by everything
+  already covered in its glob. Covering the UI surfaced four real defects; they were landed as tests
+  pinning the broken behaviour, then fixed. See `.claude/references/testing.md` § Defects found while
+  covering the UI.
+- **Authorization moved from a write-only gate to reads as well** (F1/F10/F11), with
+  `authorizationService.test.ts` (40 tests) and a page-layer role gate at
+  `app/(web)/contactlookup/layout.tsx`. A session proves only that some MP user signed in; all MP
+  data is read with the app's client-credentials service account, so the role gate is the only thing
+  deciding who may see it.
+- **Security headers and a nonce-based CSP** landed with `lib/security-headers.test.ts` (41),
+  `lib/next-config-headers.test.ts` (3), and a `Content-Security-Policy` block in `proxy.test.ts`
+  (which grew 9 → 20). Three React error boundaries arrived with `app/(web)/error.test.tsx`,
+  `app/error.test.tsx` and `app/global-error.test.tsx`.
+
+`.github/workflows/test.yml` also gained a `lockfile` job (`node scripts/check-lockfile.mjs`)
+alongside the `test` job, which runs `npx vitest run --coverage` and uploads to Codecov with
+`fail_ci_if_error: false`. What actually gates a PR is the coverage threshold exit code, not Codecov.
+
 ---
 
 ## 3. Reproducing these numbers
 
 ```bash
-npm run test:run       # 575 passed (32 files), ~4s
-npm run test:coverage   # whole-app figure, and the threshold gate
-npx tsc --noEmit        # clean
-npx eslint .            # clean
+npm run test:run       # 1015 passed (59 files), ~5.7s
+npm run test:coverage  # the whole-app figure, and the threshold gate
+npx tsc --noEmit       # clean
+npx eslint .           # clean
 ```
 
-`npm run test:coverage` prints the **whole-app** number — 71.45% statements (756/1058) — because
-feature components and app pages are in the denominator but ungated. To reproduce the **non-UI
-functional** figure quoted in §1:
-
-```bash
-npx vitest run --coverage \
-  --coverage.include='src/**/*.ts' \
-  --coverage.include='src/contexts/*.tsx' \
-  --coverage.exclude='**/*.test.*' \
-  --coverage.exclude='src/test-setup.ts' \
-  --coverage.exclude='src/lib/providers/ministry-platform/models/**' \
-  --coverage.exclude='src/lib/providers/ministry-platform/scripts/**'
-```
-
-Both numbers are honest; they differ only in denominator. Quote the one whose scope you mean.
+`npm run test:coverage` prints the number quoted in §1 directly — 99.74% statements (1159/1162).
+There is no longer a second, narrower figure to reproduce: the old non-UI-only invocation existed
+because React components sat at 0% and were excluded from the gated set, and they no longer are.
+`coverage.include` in `vitest.config.mts` is `['src/**/*.{ts,tsx}']`; the excludes are generated MP
+models, the codegen scripts, `src/components/ui/`, `src/test-setup.ts` and the test files themselves.
 
 > Two Vitest 4 gotchas. `--reporter=basic` fails (`Failed to load custom Reporter from basic`) — the
 > `basic` reporter was removed; use `default` or `dot`. And `coverage.all` no longer exists and is not
 > in the `CoverageOptions` type — setting it is a `tsc` error. `coverage.include` replaces it.
 
+> The `text` reporter **omits fully-covered files**, so most of the table below is invisible in a
+> normal run. Use `--coverage.reporter=json-summary` for real per-file numbers.
+
 ---
 
 ## 4. Coverage by layer
 
-| Layer | Stmts | Files | Assessment |
-|---|---|---|---|
-| Services (`src/services/`) | **100%** | 5 | Complete, branches 98.9% |
-| MP provider + sub-services | **99.7%** | 13 | Only the `client.ts` token-getter closure remains |
-| Server actions | **100%** | 5 | Branches 89–100% |
-| Contexts | **100%** | 2 | |
-| `lib/auth.ts` + proxy | **97.4%** | 3 | Only the one-line delegating arrow remains |
-| React feature components | **0%** | 9 | Ungated by design — see §6 |
-| UI primitives (`components/ui/`) | excluded | 19 | Thin shadcn/Radix wrappers |
-| Codegen scripts | excluded | 2 | Dev tooling, run manually |
+| Layer | Stmts | Branch | Files with statements | Assessment |
+|---|---|---|---|---|
+| Services (`src/services/`) | **100%** (220/220) | 98.28% | 6 | Complete |
+| Server actions (`**/actions.ts`) | **100%** (95/95) | 97.73% | 4 | |
+| App routes (`src/app/**`) | **100%** (65/65) | 92.59% | 16 | Small branch denominator — 27 total, so one miss costs ~4 points |
+| Contexts | **100%** (29/29) | 100% | 2 | |
+| MP provider + sub-services | **99.72%** (350/351) | 98.18% | 12 | Only the `client.ts` token-getter closure remains |
+| React feature components | **99.69%** (324/325) | 97.90% | 14 | Gated since 2026-09-12; was 0% at the previous review |
+| `src/lib` + `proxy.ts` | **98.70%** (76/77) | 92.54% | 5 | Only the `lib/auth.ts` delegating arrow remains |
+| UI primitives (`components/ui/`) | excluded | — | 19 | Thin shadcn/Radix wrappers |
+| Codegen scripts | excluded | — | 2 | Dev tooling, run manually |
 
-Only **four statements** in non-UI code are uncovered, all deliberate:
+Only **three statements** in the whole application are uncovered, all deliberate:
 
-- `app/api/auth/[...all]/route.ts` — a one-line `toNextJsHandler(auth)` re-export
-- `lib/auth.ts:198` — the arrow delegating to `enrichSessionUser`
+- `lib/auth.ts:408` — the one-line arrow delegating to `enrichSessionUser`; better-auth closes over it
 - `client.ts` — the token-getter closure handed to `HttpClient`
-- `http-client.ts:31` — one arm of the GET error-message builder
+- `contact-logs.tsx:232` — `if (!editingLog) return;`, unreachable because every path that clears
+  `editingLog` closes the dialog in the same update
 
-Plus two branch gaps at `helper.ts:189,273` — the `String(validationError)` arm of a validation-error
-message. Zod always throws an `Error`, so reaching it requires a fake schema object. Not worth the
-contrivance.
+`app/api/auth/[...all]/route.ts` and `http-client.ts:31`, listed as gaps at the previous review, are
+both covered now — the route grew a deny-by-default allowlist with 15 tests, and `http-client.test.ts`
+grew to 32.
+
+The remaining branch gaps are `helper.ts:189,273` (the `String(validationError)` arm — Zod always
+throws an `Error`, so reaching it requires a fake schema object), `route.ts:53-57` (the non-`/api/auth`
+arms of `relativeAuthPath`, which Next never routes there), `authorizationService.ts:258` (a
+`?? "no_security_role"` fallback for a reason the denial path always sets),
+`domainTimezoneService.ts:237` and `contact-logs.tsx:95,134` (the `hour === "24"` cross-ICU
+safeguards), `contact-logs.tsx:387` and `user-menu.tsx:35`. None is worth the contrivance.
 
 ---
 
@@ -218,6 +249,14 @@ or an MP user holding no security role, fails closed with `UnauthorizedError` an
 `mp.write.unauthorized` log line. `MP_WRITE_SECURITY_ROLES` narrows the gate to named roles without a
 code change.
 
+**Extended 2026-09-12 (F1/F10/F11): the gate now covers reads too**, at both the action and the
+service layer, plus a page-layer gate in `app/(web)/contactlookup/layout.tsx` that redirects to
+`/no-access`. The env var is now `MP_SECURITY_ROLES`, with `MP_WRITE_SECURITY_ROLES` kept as a
+deprecated fallback, and denials log `mp.read.unauthorized` as well. A bare session check proved
+nothing for reads: MP's OIDC endpoint authenticates any `dp_Users` record, and this app reads MP with
+its own client-credentials service account, so MP's per-user record security never applied to what
+came back.
+
 ### 5.5 Contact-log actions bypass `SessionContextService` ✅ FIXED
 
 Resolved 2026-08-21. Both inline `dp_Users` lookups are gone. The acting `User_ID` now comes from
@@ -287,7 +326,7 @@ Now rewritten to call the real `enrichSessionUser`. Verified by mutation: changi
 
 ---
 
-## 6. Remaining gaps
+## 6. Gaps from the previous review — all now closed
 
 ### `contact-logs.tsx` — was 602 lines at 0% ✅ ADDRESSED
 
@@ -310,69 +349,115 @@ Radix needs `ResizeObserver`, `hasPointerCapture`/`setPointerCapture`/`releasePo
 failing an assertion. `installJsdomPolyfills()` in that test file is the pattern to copy for the
 remaining component gaps below.
 
-Full render coverage was not chased — deliberately. These are the write-path tests, not a coverage
-exercise, and the component stays ungated in `vitest.config.mts` thresholds.
+Full render coverage was not chased in that round — deliberately. Those were the write-path tests,
+not a coverage exercise, and the component stayed ungated.
 
-### Other component gaps 🟡
+**Closed 2026-09-12.** `contact-logs.test.tsx` is now 40 tests and the file is at 99.28% statements /
+96.11% branches, inside the `src/components/**/*.tsx` gate.
 
-`contact-lookup-details.tsx` (172 LOC), `contact-lookup-results.tsx` (82), `header.tsx` (89),
-`contact-lookup-search.tsx` (68), `dynamic-breadcrumb.tsx` (65), `user-menu.tsx` (59),
-`contact-lookup.tsx` (53), `sidebar.tsx` (39) — all 0%. `@testing-library/react` is installed and
-`auth-wrapper.test.tsx` proves the harness works, so the cost is low.
+### Other component gaps ✅ CLOSED
+
+`contact-lookup-details.tsx`, `contact-lookup-results.tsx`, `header.tsx`, `contact-lookup-search.tsx`,
+`dynamic-breadcrumb.tsx`, `user-menu.tsx`, `contact-lookup.tsx` and `sidebar.tsx` were all at 0% at
+the previous review. Every one now has a co-located test file and sits at 100% statements; the
+aggregate for `src/components/**/*.tsx` is 99.69% statements / 97.90% branches, gated at 95/90.
+
+Covering them was not a box-ticking exercise — it surfaced four real defects, including a
+`formatDateTime()` that threw `RangeError` on an unparseable `Contact_Date` during unguarded row
+render, and a silent unhandled rejection on the app's only sign-out path. All four are fixed; the
+traps that invite a well-meaning revert are written up in `.claude/references/testing.md` § Defects
+found while covering the UI.
+
+Note the mechanics that make these tests possible rather than merely tedious: Radix primitives
+**throw on mount** under jsdom without `ResizeObserver` / pointer-capture / `scrollIntoView`
+polyfills, a Radix `Select` will not open from `fireEvent.pointerDown` (jsdom has no `PointerEvent`)
+and must be driven from the keyboard, and React 19's `use()` will not resume inside RTL's synchronous
+`act` scope. Each of these presents as a component bug rather than a failed assertion.
 
 ### Explicitly not worth doing
 
 - **`components/ui/` primitives** — thin Radix/shadcn wrappers. Excluded from the denominator.
-- **Codegen scripts** (`generate-types.ts`, `generate-storedprocs.ts`, 445 stmts) — dev tooling, run
-  manually, failures immediately visible. Excluding them keeps the denominator honest.
+- **Codegen scripts** (`generate-types.ts`, `generate-storedprocs.ts`) — dev tooling, run manually,
+  failures immediately visible. Excluding them keeps the denominator honest.
 - **`helper.ts:189,273`** — unreachable without a fake schema object.
 
 ---
 
-## 7. Appendix — non-UI coverage, per file
+## 7. Appendix — whole-app coverage, per file
 
-760 statements total. 17 barrel / type-only files carry zero statements and are omitted.
+1162 statements total. 19 barrel / type-only files carry zero statements and are omitted, as are
+`src/components/ui/`, the generated models and the codegen scripts (all excluded from the
+denominator). Sorted by statement coverage, then by size.
 
 | Stmts | Branch | Covered | File |
 |---:|---:|---:|---|
-| 0% | 100% | 0/1 | `app/api/auth/[...all]/route.ts` |
-| 94.73% | 100% | 18/19 | `lib/providers/ministry-platform/client.ts` |
-| 96.42% | 80% | 27/28 | `lib/auth.ts` |
-| 97.95% | 95.83% | 48/49 | `lib/providers/.../utils/http-client.ts` |
-| 100% | 81.81% | 54/54 | `lib/providers/ministry-platform/helper.ts` |
-| 100% | 89.47% | 91/91 | `components/contact-logs/actions.ts` |
-| 100% | 97.77% | 76/76 | `services/domainTimezoneService.ts` |
+| 94.44% | 100% | 17/18 | `lib/providers/ministry-platform/client.ts` |
+| 97.36% | 85.29% | 37/38 | `lib/auth.ts` |
+| 99.28% | 96.11% | 139/140 | `components/contact-logs/contact-logs.tsx` |
 | 100% | 100% | 88/88 | `lib/providers/.../services/file.service.ts` |
-| 100% | 100% | 47/47 | `services/contactLogService.ts` |
-| 100% | 100% | 33/33 | `lib/providers/.../services/table.service.ts` |
-| 100% | 100% | 33/33 | `components/contact-lookup-details/actions.ts` |
+| 100% | 97.77% | 76/76 | `services/domainTimezoneService.ts` |
+| 100% | 81.81% | 54/54 | `lib/providers/ministry-platform/helper.ts` |
+| 100% | 94.11% | 49/49 | `components/contact-logs/actions.ts` |
+| 100% | 97.05% | 49/49 | `services/authorizationService.ts` |
+| 100% | 100% | 45/45 | `lib/providers/.../utils/http-client.ts` |
+| 100% | 100% | 45/45 | `services/contactLogService.ts` |
 | 100% | 100% | 30/30 | `lib/providers/ministry-platform/provider.ts` |
-| 100% | 100% | 27/27 | `lib/providers/.../services/procedure.service.ts` |
+| 100% | 100% | 30/30 | `lib/providers/.../services/table.service.ts` |
+| 100% | 100% | 28/28 | `components/contact-lookup-details/actions.ts` |
 | 100% | 100% | 26/26 | `contexts/user-context.tsx` |
+| 100% | 100% | 25/25 | `components/contact-lookup/contact-lookup-results.tsx` |
+| 100% | 100% | 25/25 | `components/contact-lookup/contact-lookup-search.tsx` |
 | 100% | 100% | 25/25 | `lib/providers/.../services/communication.service.ts` |
-| 100% | 100% | 17/17 | `services/contactService.ts` |
+| 100% | 100% | 23/23 | `components/contact-lookup/contact-lookup.tsx` |
+| 100% | 100% | 21/21 | `lib/providers/.../services/procedure.service.ts` |
+| 100% | 100% | 20/20 | `components/sign-in/sign-in.tsx` |
+| 100% | 100% | 20/20 | `proxy.ts` |
+| 100% | 100% | 19/19 | `components/contact-lookup-details/contact-lookup-details.tsx` |
+| 100% | 100% | 19/19 | `services/contactService.ts` |
+| 100% | 100% | 17/17 | `lib/security-headers.ts` |
+| 100% | 75% | 16/16 | `app/api/auth/[...all]/route.ts` |
+| 100% | 100% | 16/16 | `services/userService.ts` |
 | 100% | 100% | 15/15 | `services/sessionContextService.ts` |
-| 100% | 100% | 15/15 | `services/userService.ts` |
-| 100% | 100% | 14/14 | `proxy.ts` |
+| 100% | 87.5% | 14/14 | `components/user-menu/user-menu.tsx` |
+| 100% | 100% | 13/13 | `components/shared-actions/user.ts` |
+| 100% | 100% | 12/12 | `components/layout/dynamic-breadcrumb.tsx` |
 | 100% | 100% | 12/12 | `lib/providers/.../services/metadata.service.ts` |
 | 100% | 100% | 11/11 | `lib/providers/.../services/domain.service.ts` |
-| 100% | 100% | 9/9 | `components/contact-lookup/actions.ts` |
+| 100% | 100% | 10/10 | `components/contact-lookup/actions.ts` |
+| 100% | 100% | 10/10 | `lib/providers/.../utils/filter-sanitize.ts` |
+| 100% | 100% | 8/8 | `components/layout/header.tsx` |
+| 100% | 100% | 8/8 | `components/layout/sidebar.tsx` |
 | 100% | 100% | 8/8 | `components/user-menu/actions.ts` |
-| 100% | 100% | 7/7 | `lib/providers/.../auth/client-credentials.ts` |
+| 100% | 100% | 7/7 | `app/auth-error/page.tsx` |
 | 100% | 100% | 7/7 | `components/layout/auth-wrapper.tsx` |
-| 100% | 100% | 6/6 | `lib/providers/.../utils/filter-sanitize.ts` |
-| 100% | 100% | 4/4 | `components/shared-actions/user.ts` |
-| 100% | 100% | 3/3 | `components/shared-actions/domain.ts` |
+| 100% | 100% | 7/7 | `lib/providers/.../auth/client-credentials.ts` |
+| 100% | 100% | 6/6 | `app/(web)/contactlookup/[guid]/page.tsx` |
+| 100% | 100% | 6/6 | `components/shared-actions/domain.ts` |
+| 100% | 100% | 5/5 | `app/(web)/error.tsx` |
+| 100% | 100% | 5/5 | `app/(web)/layout.tsx` |
+| 100% | 100% | 5/5 | `app/error.tsx` |
+| 100% | 100% | 5/5 | `app/global-error.tsx` |
+| 100% | 100% | 5/5 | `components/home-demos/contact-lookup-demo-card.tsx` |
+| 100% | 100% | 4/4 | `app/(web)/contactlookup/layout.tsx` |
 | 100% | 100% | 3/3 | `contexts/session-context.tsx` |
+| 100% | 100% | 2/2 | `app/(web)/contactlookup/page.tsx` |
+| 100% | 100% | 2/2 | `app/providers.tsx` |
+| 100% | 100% | 2/2 | `app/session-error/page.tsx` |
+| 100% | 100% | 2/2 | `app/signin/page.tsx` |
+| 100% | 100% | 1/1 | `app/(web)/home/page.tsx` |
+| 100% | 100% | 1/1 | `app/(web)/no-access/page.tsx` |
+| 100% | 100% | 1/1 | `app/(web)/page.tsx` |
+| 100% | 100% | 1/1 | `app/layout.tsx` |
 | 100% | 100% | 1/1 | `lib/auth-client.ts` |
 | 100% | 100% | 1/1 | `lib/utils.ts` |
 
-The full test inventory (575 tests across 32 files, with per-file counts) lives in
+The full test inventory (1015 tests across 59 files, with per-file counts) lives in
 `.claude/references/testing.md`.
 
 ---
 
-*All findings verified against the working tree. §5.1 was reproduced with a probe test against the
-real `ContactLogService` with a mocked `MPHelper`; that probe now ships as the regression guard in
-`contactLogService.test.ts`. §5.8 was verified by mutation. No Ministry Platform data was read or written during this review or by any test in the
-suite — every test mocks at a boundary above the network.*
+*All findings verified against the working tree at `5bc505a`. §5.1 was reproduced with a probe test
+against the real `ContactLogService` with a mocked `MPHelper`; that probe now ships as the regression
+guard in `contactLogService.test.ts`. §5.8 was verified by mutation. No Ministry Platform data was
+read or written during this review or by any test in the suite — every test mocks at a boundary above
+the network.*
