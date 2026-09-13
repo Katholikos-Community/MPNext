@@ -94,7 +94,7 @@ export default defineConfig({
         },
 
         // Global gate across everything in `include`. Achieved 2026-09-12:
-        // 99.45% stmts / 97.02% branch / 98.86% funcs / 99.71% lines. This is
+        // 99.73% stmts / 97.18% branch / 99.29% funcs / 99.91% lines. This is
         // the backstop that catches a newly added, entirely untested file —
         // the per-glob gates above cannot, since a new file lands inside a glob
         // and is diluted by everything already covered there.

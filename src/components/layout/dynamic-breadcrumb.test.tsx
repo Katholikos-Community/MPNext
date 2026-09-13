@@ -4,10 +4,10 @@ import { render, screen } from "@testing-library/react";
 /**
  * DynamicBreadcrumb tests.
  *
- * This component derives the whole trail from `usePathname()` with no route
- * table — every label is a mechanical transform of the URL segment. That makes
- * it cheap, but it also means the two rules below are invisible until they
- * break in production, so they are pinned here:
+ * This component derives the whole trail from `usePathname()` alone, with no
+ * router or data of its own. That makes it cheap, but it also means the two
+ * rules below are invisible until they break in production, so they are pinned
+ * here:
  *
  * - "Home" is a fixed first crumb, and the root path must NOT produce a second,
  *   duplicate crumb for itself.
@@ -16,11 +16,13 @@ import { render, screen } from "@testing-library/react";
  *   here either makes the current page clickable or strands the user by
  *   rendering ancestor crumbs as dead text.
  *
- * The label transform is also covered directly, because it is crude: it only
- * upper-cases the first character and swaps hyphens for spaces. Opaque segments
- * such as a contact GUID therefore land in the UI mangled rather than resolved
- * to a person's name. That is the behaviour today, and this file pins it so a
- * future move to real, looked-up labels is a deliberate change, not a surprise.
+ * Label derivation is also covered directly, because it has three tiers and the
+ * order between them matters: a known-route lookup first, then a GUID segment
+ * rendered as the generic "Details", then the crude fallback (upper-case the
+ * first character, swap hyphens for spaces) for everything else. The GUID rule
+ * is pinned from both sides — real GUIDs in any case must match, and merely
+ * GUID-ish segments must NOT — because a loose pattern would silently relabel
+ * ordinary slugs "Details".
  *
  * `usePathname` is mocked rather than driven through a real router: these tests
  * are about the derivation, not Next's navigation.
@@ -70,31 +72,79 @@ describe("DynamicBreadcrumb", () => {
     expect(screen.getByRole("link", { current: "page" })).toHaveTextContent("Home");
   });
 
-  it("capitalises a known route segment", () => {
+  it("uses the mapped display label for a known route segment", () => {
     mockUsePathname.mockReturnValue("/contactlookup");
 
     render(<DynamicBreadcrumb />);
 
+    // The crude transform cannot find the word boundary in "contactlookup", so
+    // this label has to come from the known-segment map.
     expect(crumbs()).toEqual([
       ["Home", "/"],
-      ["Contactlookup", null],
+      ["Contact Lookup", null],
     ]);
   });
 
-  it("links ancestor segments and leaves the leaf as the current page", () => {
+  it("links ancestor segments and labels a GUID leaf as the current page", () => {
     const guid = "ab12cd34-ef56-7890-abcd-ef1234567890";
     mockUsePathname.mockReturnValue(`/contactlookup/${guid}`);
 
     render(<DynamicBreadcrumb />);
 
-    // The leaf label is the GUID run through the same lossy transform, hyphens
-    // and all. It is ugly, but it is the current contract — assert it so any
-    // move to real, resolved labels is a deliberate change, not a silent one.
+    // The contact's real name is not available here — the layout renders this
+    // component with no props and cannot see the page's data — so a GUID is
+    // deliberately shown as the generic "Details" rather than a mangled GUID.
     expect(crumbs()).toEqual([
       ["Home", "/"],
-      ["Contactlookup", "/contactlookup"],
-      ["Ab12cd34 ef56 7890 abcd ef1234567890", null],
+      ["Contact Lookup", "/contactlookup"],
+      ["Details", null],
     ]);
+  });
+
+  it("matches GUID segments case-insensitively", () => {
+    mockUsePathname.mockReturnValue("/contactlookup/AB12CD34-EF56-7890-ABCD-EF1234567890");
+
+    render(<DynamicBreadcrumb />);
+
+    expect(crumbs()).toEqual([
+      ["Home", "/"],
+      ["Contact Lookup", "/contactlookup"],
+      ["Details", null],
+    ]);
+  });
+
+  it("matches mixed-case GUID segments", () => {
+    mockUsePathname.mockReturnValue("/contactlookup/Ab12Cd34-eF56-7890-AbCd-eF1234567890");
+
+    render(<DynamicBreadcrumb />);
+
+    expect(crumbs()).toEqual([
+      ["Home", "/"],
+      ["Contact Lookup", "/contactlookup"],
+      ["Details", null],
+    ]);
+  });
+
+  it.each([
+    // Right shape, wrong group lengths — one hex digit short in the last group.
+    "ab12cd34-ef56-7890-abcd-ef123456789",
+    // Five groups of plausible-looking hex, but the wrong sizes throughout.
+    "abcd-ef12-3456-7890-abcdef123456",
+    // A single hex word, no groups at all.
+    "deadbeef",
+    // Hyphenated, hex-ish, but not five groups.
+    "cafe-babe",
+  ])("does not label the GUID-ish segment %s as Details", (segment) => {
+    mockUsePathname.mockReturnValue(`/contactlookup/${segment}`);
+
+    render(<DynamicBreadcrumb />);
+
+    const leaf = crumbs().at(-1);
+    expect(leaf?.[0]).not.toBe("Details");
+    // It falls through to the crude transform instead.
+    expect(leaf?.[0]).toBe(
+      segment.charAt(0).toUpperCase() + segment.slice(1).replace(/-/g, " ")
+    );
   });
 
   it("builds cumulative hrefs for deeply nested paths", () => {
@@ -104,7 +154,7 @@ describe("DynamicBreadcrumb", () => {
 
     expect(crumbs()).toEqual([
       ["Home", "/"],
-      ["Contactlookup", "/contactlookup"],
+      ["Contact Lookup", "/contactlookup"],
       ["42", "/contactlookup/42"],
       ["Logs", null],
     ]);
@@ -129,7 +179,7 @@ describe("DynamicBreadcrumb", () => {
 
     expect(crumbs()).toEqual([
       ["Home", "/"],
-      ["Contactlookup", null],
+      ["Contact Lookup", null],
     ]);
   });
 

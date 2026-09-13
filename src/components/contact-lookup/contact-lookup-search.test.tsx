@@ -13,7 +13,9 @@ import type { ContactSearch } from "@/lib/dto";
  *
  * 1. the empty/whitespace gate — a blank box must not fire a server round trip
  *    (the action returns [] for a blank term, so a regression here is invisible
- *    in the UI but still hits the server on every stray Enter press)
+ *    in the UI but still hits the server on every stray Enter press), while
+ *    still reporting [] to the parent so a stale result list is cleared rather
+ *    than left on screen after the user empties the box
  * 2. the trim contract — the action is called with the trimmed term, so a paste
  *    with trailing whitespace still finds the contact
  * 3. the in-flight lock — input and button are disabled while the transition is
@@ -100,9 +102,15 @@ describe("ContactLookupSearch", () => {
 
   describe("empty and whitespace input", () => {
     it("keeps the search button disabled until something is typed", () => {
-      const { button } = renderSearch();
+      const { button, onSearchResults } = renderSearch();
 
       expect(button()).toBeDisabled();
+
+      // The button path is unchanged by the empty-term clear: the disabled
+      // button swallows the click, so only Enter can clear the list.
+      fireEvent.click(button());
+      expect(onSearchResults).not.toHaveBeenCalled();
+      expect(mockSearchContacts).not.toHaveBeenCalled();
     });
 
     it("leaves the button disabled for a whitespace-only term", () => {
@@ -113,23 +121,48 @@ describe("ContactLookupSearch", () => {
       expect(button()).toBeDisabled();
     });
 
-    it("does not call the action when Enter is pressed on an empty box", async () => {
-      const { input, onSearchStart } = renderSearch();
+    it("clears the results without calling the action when Enter is pressed on an empty box", async () => {
+      const { input, onSearchStart, onSearchResults, onSearchError } =
+        renderSearch();
 
       pressEnter(input);
 
+      // The parent is told to empty its list — this is how a user wipes stale
+      // matches after clearing the box — but no MP round trip is made.
+      expect(onSearchResults).toHaveBeenCalledWith([]);
       await waitFor(() => expect(mockSearchContacts).not.toHaveBeenCalled());
       expect(onSearchStart).not.toHaveBeenCalled();
+      expect(onSearchError).not.toHaveBeenCalled();
     });
 
-    it("does not call the action when Enter is pressed on a whitespace-only term", async () => {
-      const { input, onSearchStart } = renderSearch();
+    it("clears the results without calling the action when Enter is pressed on a whitespace-only term", async () => {
+      const { input, onSearchStart, onSearchResults, onSearchError } =
+        renderSearch();
 
       type(input, "  \t ");
       pressEnter(input);
 
+      expect(onSearchResults).toHaveBeenCalledWith([]);
       await waitFor(() => expect(mockSearchContacts).not.toHaveBeenCalled());
       expect(onSearchStart).not.toHaveBeenCalled();
+      expect(onSearchError).not.toHaveBeenCalled();
+    });
+
+    it("does not clear the results on a non-Enter key in an empty box", async () => {
+      const { input, onSearchResults } = renderSearch();
+
+      fireEvent.keyPress(input, { key: "a", code: "KeyA", charCode: 97 });
+
+      expect(onSearchResults).not.toHaveBeenCalled();
+      await waitFor(() => expect(mockSearchContacts).not.toHaveBeenCalled());
+    });
+
+    it("does not throw clearing an empty box without an onSearchResults callback", () => {
+      render(<ContactLookupSearch />);
+
+      pressEnter(screen.getByRole("textbox"));
+
+      expect(mockSearchContacts).not.toHaveBeenCalled();
     });
 
     it("ignores non-Enter keys", async () => {

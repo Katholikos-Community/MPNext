@@ -59,7 +59,15 @@ interface ContactLogsProps {
   onRefresh?: () => void;
 }
 
+const DATE_PLACEHOLDER = "—";
+
 function formatDateTime(dateString: string, timeZone: string): string {
+  // Rendered unguarded for every row, and the app has no error boundary, so an
+  // unparseable value must degrade to a placeholder rather than throw — a
+  // single bad datetime would otherwise take down the whole contact page.
+  if (!dateString || !dateString.trim()) {
+    return DATE_PLACEHOLDER;
+  }
   // MP returns wall-clock datetimes in its domain time zone (no zone marker).
   // `new Date(...)` would parse those as browser-local — wrong for users in
   // a different zone. Treat the string as MP-TZ wall-clock and format with
@@ -96,6 +104,9 @@ function formatDateTime(dateString: string, timeZone: string): string {
     instant = new Date(utcGuess + (utcGuess - projectedUtc));
   } else {
     instant = new Date(dateString);
+    if (Number.isNaN(instant.getTime())) {
+      return DATE_PLACEHOLDER;
+    }
   }
   return new Intl.DateTimeFormat("en-US", {
     timeZone,
